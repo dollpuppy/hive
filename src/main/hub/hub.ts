@@ -23,6 +23,14 @@ import type { Channel, ChannelHandler } from "./channel";
 /** Viewer URL peer segment that refers to this Hub's own sources (dashboard previews). */
 export const SELF_SLUG = "me";
 
+/**
+ * "rejected" reasons this Hub can emit locally, beyond the wire-protocol `RejectReason` enum.
+ * "already-partnered" fires when a second outgoing link welcomes in while we already have a
+ * partner — a local race, not something the remote host told us — so it must stay distinct
+ * from a remote "full" rejection (which is retryable; see joiner.ts).
+ */
+type LocalRejectReason = RejectReason | "already-partnered";
+
 export interface Partner {
   name: string;
   slug: string;
@@ -232,7 +240,7 @@ export class Hub extends EventEmitter {
     }
     if (msg.type !== "welcome") return;
     if (this.peer && this.peer !== link) {
-      this.emit("rejected", "full" satisfies RejectReason);
+      this.emit("rejected", "already-partnered" satisfies LocalRejectReason);
       link.closed = true;
       link.channel.close(1000, "already partnered");
       return;

@@ -54,7 +54,7 @@ describe("Hub hardening", () => {
       connectHubs(c, b, "T");
       await flush();
 
-      expect(reasons).toEqual(["full"]);
+      expect(reasons).toEqual(["already-partnered"]);
       expect(b.partner?.name).toBe("Host Ana");
     });
   });

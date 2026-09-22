@@ -10,6 +10,8 @@ export interface JoinOptions {
   hub: Hub;
   invite: string;
   retryWindowMs?: number;
+  /** How long to wait for "welcome" after the socket opens before giving up on this attempt. */
+  welcomeTimeoutMs?: number;
   onStatus: (status: JoinStatus, detail?: string) => void;
 }
 
@@ -25,14 +27,27 @@ export function joinPartner(opts: JoinOptions): JoinHandle {
     opts.onStatus("failed", "invalid-link");
     return { stop: () => undefined };
   }
-  const windowMs = opts.retryWindowMs ?? 60_000;
   const { hub } = opts;
+  if (hub.partner) {
+    opts.onStatus("failed", "already-partnered");
+    return { stop: () => undefined };
+  }
+  const windowMs = opts.retryWindowMs ?? 60_000;
+  const welcomeTimeoutMs = opts.welcomeTimeoutMs ?? 10_000;
   let done = false;
   let everConnected = false;
+  /** True once THIS attempt's link has produced a partner; scopes "partner"/"kicked" events to our own live socket. */
+  let linked = false;
   let socket: WebSocket | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let welcomeTimer: ReturnType<typeof setTimeout> | null = null;
   let delay = 1000;
   let deadline = Date.now() + windowMs;
+
+  const clearWelcomeTimer = (): void => {
+    if (welcomeTimer) clearTimeout(welcomeTimer);
+    welcomeTimer = null;
+  };
 
   const finish = (status: JoinStatus, detail?: string): void => {
     if (done) return;
@@ -42,21 +57,39 @@ export function joinPartner(opts: JoinOptions): JoinHandle {
     hub.off("kicked", onKicked);
     if (timer) clearTimeout(timer);
     timer = null;
+    clearWelcomeTimer();
     opts.onStatus(status, detail);
   };
 
   const onPartner = (partner: Partner | null): void => {
     if (done) return;
     if (partner) {
+      // A stale link (not our current open socket) still finishing its handshake — ignore it.
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      linked = true;
+      clearWelcomeTimer();
       everConnected = true;
       delay = 1000;
       opts.onStatus("connected");
     } else {
+      if (!linked) return;
+      linked = false;
       deadline = Date.now() + windowMs;
+      // Force the half-open socket closed now instead of waiting on ws's own close handshake.
+      socket?.terminate();
+      opts.onStatus("reconnecting");
     }
   };
-  const onRejected = (reason: string): void => finish("rejected", reason);
-  const onKicked = (): void => finish("rejected", "kicked");
+  const onRejected = (reason: string): void => {
+    // A host that's "full" because our own last link with it hasn't timed out yet is worth
+    // retrying — the slot frees up once that stale link's heartbeat lapses.
+    if (everConnected && reason === "full") return;
+    finish("rejected", reason);
+  };
+  const onKicked = (): void => {
+    if (!linked) return;
+    finish("rejected", "kicked");
+  };
   hub.on("partner", onPartner);
   hub.on("rejected", onRejected);
   hub.on("kicked", onKicked);
@@ -77,11 +110,19 @@ export function joinPartner(opts: JoinOptions): JoinHandle {
     opts.onStatus(everConnected ? "reconnecting" : "connecting");
     const ws = new WebSocket(parsed.hubUrl, { handshakeTimeout: 10_000, maxPayload: MAX_MESSAGE_CHARS });
     socket = ws;
-    ws.on("open", () => bindSocket(ws, hub.attachOutgoingPeer(wsChannel(ws), parsed.secret)));
+    ws.on("open", () => {
+      bindSocket(ws, hub.attachOutgoingPeer(wsChannel(ws), parsed.secret));
+      clearWelcomeTimer();
+      welcomeTimer = setTimeout(() => {
+        if (socket === ws && !linked) ws.terminate();
+      }, welcomeTimeoutMs);
+    });
     ws.on("error", () => undefined);
     ws.on("close", () => {
       if (socket !== ws) return;
       socket = null;
+      linked = false;
+      clearWelcomeTimer();
       if (everConnected && !done) opts.onStatus("reconnecting");
       scheduleRetry();
     });
