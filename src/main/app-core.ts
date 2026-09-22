@@ -25,12 +25,15 @@ export interface AppCore {
 }
 
 /**
- * Extra Origins allowed on /local/viewer: our own file:// pages (Chromium sends
- * `Origin: file://` on a WebSocket handshake from a file: page) and the dev server.
+ * Extra Origins allowed on /local/viewer: only the renderer dev server, when running
+ * under it. `file://` is deliberately not allowed: any local HTML file in any Chromium
+ * browser sends that Origin and could otherwise watch partner streams and receive
+ * TURN credentials. The Publisher (a file: page) uses the token-protected
+ * /local/publisher, which has no Origin check.
  */
-export function devOrigins(): string[] {
+export function viewerDevOrigins(): string[] {
   const dev = rendererDevUrl();
-  return ["file://", ...(dev ? [new URL(dev).origin] : [])];
+  return dev ? [new URL(dev).origin] : [];
 }
 
 export async function startAppCore(argv: string[]): Promise<AppCore> {
@@ -57,7 +60,7 @@ export async function startAppCore(argv: string[]): Promise<AppCore> {
   const server = await startLocalServer({
     hub,
     publisherToken,
-    extraOrigins: devOrigins(),
+    extraOrigins: viewerDevOrigins(),
     httpRoutes: [viewerRoute(join(__dirname, "../viewer"))],
   });
 
