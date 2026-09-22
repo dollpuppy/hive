@@ -43,6 +43,8 @@ export function joinPartner(opts: JoinOptions): JoinHandle {
   let welcomeTimer: ReturnType<typeof setTimeout> | null = null;
   let delay = 1000;
   let deadline = Date.now() + windowMs;
+  /** Last retryable rejection reason (e.g. "full") seen this cycle; reported instead of "unreachable" if the window runs out. */
+  let lastRejectReason: string | undefined;
 
   const clearWelcomeTimer = (): void => {
     if (welcomeTimer) clearTimeout(welcomeTimer);
@@ -70,6 +72,7 @@ export function joinPartner(opts: JoinOptions): JoinHandle {
       clearWelcomeTimer();
       everConnected = true;
       delay = 1000;
+      lastRejectReason = undefined;
       opts.onStatus("connected");
     } else {
       if (!linked) return;
@@ -83,7 +86,10 @@ export function joinPartner(opts: JoinOptions): JoinHandle {
   const onRejected = (reason: string): void => {
     // A host that's "full" because our own last link with it hasn't timed out yet is worth
     // retrying — the slot frees up once that stale link's heartbeat lapses.
-    if (everConnected && reason === "full") return;
+    if (everConnected && reason === "full") {
+      lastRejectReason = reason;
+      return;
+    }
     finish("rejected", reason);
   };
   const onKicked = (): void => {
@@ -97,7 +103,7 @@ export function joinPartner(opts: JoinOptions): JoinHandle {
   const scheduleRetry = (): void => {
     if (done) return;
     if (Date.now() > deadline) {
-      finish("failed", "unreachable");
+      finish("failed", lastRejectReason ?? "unreachable");
       return;
     }
     timer = setTimeout(connect, delay);
@@ -121,6 +127,10 @@ export function joinPartner(opts: JoinOptions): JoinHandle {
     ws.on("close", () => {
       if (socket !== ws) return;
       socket = null;
+      // This runs before the Hub's own "partner" null event (registered later, on "open"), so
+      // a clean disconnect from a link that was actually established must refresh the window
+      // itself here — a long healthy session shouldn't count against the retry budget.
+      if (linked) deadline = Date.now() + windowMs;
       linked = false;
       clearWelcomeTimer();
       if (everConnected && !done) opts.onStatus("reconnecting");

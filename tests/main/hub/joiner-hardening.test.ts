@@ -155,4 +155,66 @@ describe("joinPartner hardening", () => {
     joinPartner({ hub: j, invite: `http://127.0.0.1:${h.server.port}/join#S`, onStatus: (s, d) => statuses.push([s, d]) });
     expect(statuses).toEqual([["failed", "already-partnered"]]);
   });
+
+  it("refreshes the retry window on a clean disconnect after a long-lived connection", async () => {
+    const first = await host();
+    const port = first.server.port;
+    const j = joiner();
+    const statuses: JoinStatus[] = [];
+    const join = joinPartner({
+      hub: j,
+      invite: `http://127.0.0.1:${port}/join#S`,
+      retryWindowMs: 1000,
+      onStatus: (s) => statuses.push(s),
+    });
+    cleanups.push(() => join.stop());
+    await waitFor(() => j.partner !== null);
+
+    // Stay connected well past the (short) retry window before disconnecting cleanly. A
+    // long healthy session shouldn't count against the retry budget for reconnecting after.
+    await new Promise((r) => setTimeout(r, 1500));
+
+    await first.server.close();
+    first.hub.dispose();
+    // Wait for the disconnect to actually be detected client-side before bringing the host
+    // back — otherwise a not-yet-propagated close could let a stale `j.partner` make this
+    // assertion pass without ever exercising the reconnect path.
+    await waitFor(() => statuses.includes("reconnecting"));
+    await host({}, [port]);
+
+    await waitFor(() => j.partner !== null);
+    expect(statuses.at(-1)).toBe("connected");
+    expect(statuses).not.toContain("failed");
+  });
+
+  it("reports the last-seen rejection reason instead of 'unreachable' when the window runs out", async () => {
+    const first = await host();
+    const port = first.server.port;
+    const j = joiner();
+    const statuses: [JoinStatus, string | undefined][] = [];
+    const join = joinPartner({
+      hub: j,
+      invite: `http://127.0.0.1:${port}/join#S`,
+      retryWindowMs: 1500,
+      onStatus: (s, d) => statuses.push([s, d]),
+    });
+    cleanups.push(() => join.stop());
+    await waitFor(() => j.partner !== null);
+
+    // Disconnect cleanly, then bring the host back permanently "full" (stale fake peer, never
+    // released) so every retry is rejected until the window runs out.
+    await first.server.close();
+    first.hub.dispose();
+
+    const second = await host({}, [port]);
+    const stale = new FakeChannel();
+    const staleHandler = second.hub.attachIncomingPeer(stale);
+    staleHandler.onMessage(
+      JSON.stringify({ type: "hello", secret: "S", peerName: "Stale", protocolVersion: PROTOCOL_VERSION }),
+    );
+    expect(second.hub.partner?.name).toBe("Stale");
+
+    await waitFor(() => statuses.some(([s]) => s === "failed"));
+    expect(statuses.at(-1)).toEqual(["failed", "full"]);
+  });
 });
