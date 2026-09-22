@@ -458,6 +458,11 @@ export class Hub extends EventEmitter {
         for (const [subId, sub] of [...this.subs]) {
           if (sub.target === "publisher") this.endSub(subId, "publisher");
         }
+        // Nothing can be captured until the Publisher is back; it re-sends its real
+        // statuses when it reconnects. (A replaced Publisher skips this: the new one reports.)
+        if (this.localSources.some((s) => s.status !== "unavailable")) {
+          this.setLocalSources(this.localSources.map((s) => ({ ...s, status: "unavailable" as const })));
+        }
       },
     };
   }

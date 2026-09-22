@@ -152,6 +152,31 @@ describe("Hub routing: local preview of own source", () => {
     expect(viewer.ofType("ended")).toHaveLength(1);
   });
 
+  it("marks local sources unavailable when the Publisher disconnects, until it reports again", async () => {
+    const { host, joiner, hostPubIn } = await pair();
+    hostPubIn.onMessage(JSON.stringify({ type: "source-status", sourceId: "src-game", status: "live" }));
+    await flush();
+    expect(joiner.partner?.sources[0]?.status).toBe("live");
+
+    hostPubIn.onClose();
+    await flush();
+    expect(host.sources[0]?.status).toBe("unavailable");
+    expect(joiner.partner?.sources[0]?.status).toBe("unavailable");
+
+    const again = host.attachPublisher(new FakeChannel());
+    again.onMessage(JSON.stringify({ type: "source-status", sourceId: "src-game", status: "idle" }));
+    await flush();
+    expect(joiner.partner?.sources[0]?.status).toBe("idle");
+  });
+
+  it("a replaced Publisher does not mark sources unavailable", async () => {
+    const { host, hostPubIn } = await pair();
+    hostPubIn.onMessage(JSON.stringify({ type: "source-status", sourceId: "src-game", status: "live" }));
+    host.attachPublisher(new FakeChannel());
+    hostPubIn.onClose(); // the old socket closing after replacement
+    expect(host.sources[0]?.status).toBe("live");
+  });
+
   it("a viewer cannot inject signals into another viewer's sub", () => {
     const hub = new Hub({ displayName: "Ana", getInviteSecret: () => null, getIceServers: () => ice });
     const pub = new FakeChannel();
