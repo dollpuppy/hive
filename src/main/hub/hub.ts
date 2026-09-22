@@ -426,6 +426,7 @@ export class Hub extends EventEmitter {
       old.close(PUBLISHER_REPLACED_CLOSE_CODE, "replaced");
     }
     this.publisher = channel;
+    this.emit("publisher", true);
     return {
       onMessage: (raw) => {
         if (this.publisher !== channel) return;
@@ -453,6 +454,7 @@ export class Hub extends EventEmitter {
       onClose: () => {
         if (this.publisher !== channel) return;
         this.publisher = null;
+        this.emit("publisher", false);
         for (const [subId, sub] of [...this.subs]) {
           if (sub.target === "publisher") this.endSub(subId, "publisher");
         }
