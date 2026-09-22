@@ -48,4 +48,14 @@ describe("alpha packing", () => {
     expectNear(px.br!, [0, 0, 0, 0], 24);
     await page.close();
   });
+
+  it("letterboxes a narrower source with transparent pillarbox bars", async () => {
+    const page = await browser.newPage();
+    await page.goto(`http://127.0.0.1:${server.port}/alpha/index.html`);
+    const px = (await page.evaluate(() => (window as any).alphaTest.pillarbox())) as Record<string, Px>;
+    expectNear(px.centre!, [255, 0, 0, 255], 3);
+    expectNear(px.left!, [0, 0, 0, 0], 3);
+    expectNear(px.right!, [0, 0, 0, 0], 3);
+    await page.close();
+  });
 });
