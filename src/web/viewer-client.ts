@@ -27,6 +27,7 @@ export class ViewerClient {
 
   start(): void {
     this.stopped = false;
+    this.delay = MIN_DELAY_MS;
     if (this.ws || this.retryTimer) return;
     this.connect();
   }
@@ -40,7 +41,7 @@ export class ViewerClient {
 
   private connect(): void {
     this.retryTimer = null;
-    if (this.stopped) return;
+    if (this.stopped || this.ws) return;
     const ws = new WebSocket(this.opts.url);
     this.ws = ws;
     ws.onopen = () => ws.send(JSON.stringify({ type: "watch", peer: this.opts.peer, source: this.opts.source }));
@@ -100,19 +101,23 @@ export class ViewerClient {
     pc.ontrack = (e) => {
       if (this.pc === pc) this.opts.onStream(e.streams[0] ?? new MediaStream([e.track]), source);
     };
+    let everConnected = false;
     pc.onconnectionstatechange = () => {
       if (this.pc !== pc) return;
       if (pc.connectionState === "connected") {
+        everConnected = true;
         if (this.connectTimer) clearTimeout(this.connectTimer);
         this.connectTimer = null;
         this.delay = MIN_DELAY_MS;
       } else if (pc.connectionState === "failed") {
-        this.iceFailed(pc, subId);
+        // A session that connected and later dropped is not a TURN problem: just retry.
+        if (everConnected) this.retry();
+        else this.iceFailed(pc, subId);
       }
     };
     this.connectTimer = setTimeout(() => {
       this.connectTimer = null;
-      if (pc.connectionState !== "connected") this.iceFailed(pc, subId);
+      if (!everConnected) this.iceFailed(pc, subId);
     }, this.opts.connectTimeoutMs ?? 10_000);
   }
 
@@ -153,7 +158,8 @@ export class ViewerClient {
   private retry(): void {
     this.teardown();
     this.opts.onIdle();
-    if (this.stopped) return;
+    // onIdle may have called start() (a socket is already open) or stop().
+    if (this.stopped || this.ws) return;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = setTimeout(() => this.connect(), this.delay);
     this.delay = Math.min(this.delay * 2, MAX_DELAY_MS);
