@@ -66,9 +66,12 @@ export function installDisplayMediaHandler(publisher: WebContents): void {
       }
     };
 
+    // Other pages' requests are denied without touching the selection, so they can't
+    // cancel an open the Publisher has in flight.
+    if (!isPublisherMainFrame(publisher, request.frame)) return answer(null);
     const selection = pending;
     pending = null;
-    if (!isPublisherMainFrame(publisher, request.frame) || !request.videoRequested) return answer(null);
+    if (!request.videoRequested) return answer(null);
     if (!selection || Date.now() > selection.expires) return answer(null);
 
     // Windows first: a window titled like a screen ("Screen 1") must not lose to the screen.
