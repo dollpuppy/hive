@@ -26,6 +26,10 @@ export const openWindow: Opener = (source: SourceConfig) => {
       } catch (err) {
         throw new CaptureError("unavailable", `could not select window "${title}": ${message(err)}`);
       }
+      if (timedOut) {
+        // A later open may already own main's window grant; calling getDisplayMedia now would consume it.
+        throw new CaptureError("unavailable", `window "${title}" selected after the timeout`);
+      }
       let stream: MediaStream;
       try {
         stream = await navigator.mediaDevices.getDisplayMedia({

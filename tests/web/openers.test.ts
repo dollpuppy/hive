@@ -139,6 +139,32 @@ describe("openWindow", () => {
     expect(s.track.stopped).toBe(false);
   });
 
+  it("skips getDisplayMedia when selectWindow answers after the timeout", async () => {
+    vi.useFakeTimers();
+    const hung = deferred<void>();
+    selectWindow.mockImplementationOnce(async (title: string) => {
+      events.push(`select ${title}`);
+      await hung.promise;
+    });
+    const a = openers.openWindow(win("A"));
+    const aErr = a.catch((e: unknown) => e);
+    const b = openers.openWindow(win("B"));
+    await flush();
+    expect(events).toEqual(["select A"]);
+    await vi.advanceTimersByTimeAsync(openers.OPEN_WINDOW_TIMEOUT_MS);
+    expect((await aErr as CaptureErrorType).message).toContain("timed out opening window");
+    await flush();
+    expect(events).toEqual(["select A", "select B", "gdm"]);
+    // A's select finally returns while B is waiting on its grant: A must not call getDisplayMedia.
+    hung.resolve();
+    await flush();
+    expect(getDisplayMedia).toHaveBeenCalledTimes(1);
+    const s = fakeStream();
+    displays[0]!.resolve(s.stream);
+    await expect(b).resolves.toEqual({ stream: s.stream });
+    expect(getDisplayMedia).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects non-window sources", async () => {
     await expect(openers.openWindow(cam)).rejects.toThrow("not a window source");
   });
