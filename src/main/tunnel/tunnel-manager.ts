@@ -35,7 +35,6 @@ export class TunnelManager extends EventEmitter {
   private proc: TunnelProcess | null = null;
   private port = 0;
   private attempts = 0;
-  private stopping = false;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private startTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly spawnFn: SpawnFn;
@@ -59,19 +58,16 @@ export class TunnelManager extends EventEmitter {
     if (this.proc || this.restartTimer) return;
     this.port = port;
     this.attempts = 0;
-    this.stopping = false;
     this.setState({ status: "starting" });
     this.launch();
   }
 
   stop(): void {
-    this.stopping = true;
     this.clearTimers();
-    if (this.proc) {
-      this.proc.kill();
-    } else {
-      this.setState({ status: "stopped" });
-    }
+    const proc = this.proc;
+    this.proc = null;
+    if (proc) proc.kill();
+    this.setState({ status: "stopped" });
   }
 
   private launch(): void {
@@ -109,10 +105,6 @@ export class TunnelManager extends EventEmitter {
     this.proc = null;
     if (this.startTimer) clearTimeout(this.startTimer);
     this.startTimer = null;
-    if (this.stopping) {
-      this.setState({ status: "stopped" });
-      return;
-    }
     this.attempts++;
     if (this.attempts > this.maxRestarts) {
       this.setState({ status: "failed", error: `cloudflared exited ${this.attempts} times` });

@@ -129,4 +129,16 @@ describe("TunnelManager", () => {
     await flush();
     expect(states.map((s) => s.status)).toEqual(["starting", "up", "stopped"]);
   });
+
+  it("stop then immediate start runs a fresh process", async () => {
+    manager.start(7420);
+    manager.stop();
+    manager.start(7420);
+    await flush();
+    expect(procs).toHaveLength(2);
+    expect(manager.state).toEqual({ status: "starting" });
+    procs[1]!.print("https://a.trycloudflare.com\n");
+    await flush();
+    expect(manager.state).toEqual({ status: "up", url: "https://a.trycloudflare.com" });
+  });
 });
