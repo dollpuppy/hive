@@ -1,0 +1,164 @@
+import { BrowserWindow, session, type Session, type Streams, type WebContents } from "electron";
+import { forwardSharedTexture } from "@napolab/texture-bridge-core/electron";
+
+/** Non-persistent (no `persist:` prefix) session shared by every URL source. */
+export const URL_SOURCES_PARTITION = "hive-url-sources";
+
+const RELOAD_AFTER_CRASH_MS = 1000;
+const MAX_ID_CHARS = 256;
+const MAX_DIMENSION = 8192;
+const MAX_FPS = 240;
+
+function isWebUrl(url: string): boolean {
+  try {
+    const { protocol } = new URL(url);
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function requireSize(value: number, what: string, max: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > max) throw new Error(`invalid ${what}`);
+  return value;
+}
+
+let configuredSession: Session | null = null;
+
+/**
+ * The URL-source session, locked down once: remote pages get no permissions,
+ * no display capture, and no downloads. Lazy because sessions need app ready.
+ */
+function urlSourcesSession(): Session {
+  if (configuredSession) return configuredSession;
+  const ses = session.fromPartition(URL_SOURCES_PARTITION);
+  ses.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+  ses.setPermissionCheckHandler(() => false);
+  ses.setDevicePermissionHandler(() => false);
+  ses.setDisplayMediaRequestHandler((_request, callback) => {
+    try {
+      // Electron's docs deny with callback(null); its typings only admit Streams.
+      callback(null as unknown as Streams);
+    } catch (err) {
+      console.error("[hive] url-source display-media deny failed:", err);
+    }
+  });
+  ses.on("will-download", (_event, item) => item.cancel());
+  configuredSession = ses;
+  return ses;
+}
+
+interface UrlSource {
+  readonly win: BrowserWindow;
+  drops: number;
+  reloadTimer: ReturnType<typeof setTimeout> | null;
+}
+
+/**
+ * Renders URL sources in offscreen windows and forwards each paint texture
+ * zero-copy to the Publisher, tagged with extraArgs [sourceId]. Each source gets
+ * its own sandboxed window in an isolated session: the Publisher runs with
+ * nodeIntegration and must never load remote content itself.
+ */
+export class UrlSources {
+  private readonly sources = new Map<string, UrlSource>();
+
+  constructor(private readonly target: () => WebContents | null) {}
+
+  /** Throws on invalid input (including any non-http(s) URL); load failures are only logged. */
+  open(sourceId: string, url: string, width: number, height: number, fps: number): void {
+    if (typeof sourceId !== "string" || sourceId === "" || sourceId.length > MAX_ID_CHARS) {
+      throw new Error("invalid sourceId");
+    }
+    if (typeof url !== "string" || !isWebUrl(url)) throw new Error("URL sources must be http(s)");
+    requireSize(width, "width", MAX_DIMENSION);
+    requireSize(height, "height", MAX_DIMENSION);
+    requireSize(fps, "fps", MAX_FPS);
+    this.close(sourceId);
+
+    const win = new BrowserWindow({
+      show: false,
+      width,
+      height,
+      useContentSize: true,
+      webPreferences: {
+        session: urlSourcesSession(),
+        offscreen: { useSharedTexture: true, deviceScaleFactor: 1 },
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        webviewTag: false,
+        backgroundThrottling: false,
+      },
+    });
+    const entry: UrlSource = { win, drops: 0, reloadTimer: null };
+    this.sources.set(sourceId, entry); // registered first so close() can always reach the window
+    const wc = win.webContents;
+    const isCurrent = (): boolean => this.sources.get(sourceId) === entry;
+
+    wc.setWindowOpenHandler(() => ({ action: "deny" }));
+    wc.on("will-navigate", (event) => {
+      if (!isWebUrl(event.url)) event.preventDefault();
+    });
+    wc.on("will-redirect", (event) => {
+      if (!isWebUrl(event.url)) event.preventDefault();
+    });
+    wc.on("will-attach-webview", (event) => event.preventDefault());
+    wc.setAudioMuted(true);
+
+    // Synchronous handler; forward is fire-and-forget (its import + send dispatch run
+    // before its first await, so releasing in finally is safe); release in finally.
+    wc.on("paint", (event) => {
+      const texture = event.texture;
+      if (!texture) return;
+      try {
+        const target = this.target();
+        if (target && !target.isDestroyed()) {
+          // Resolves a ForwardDefect or undefined; never rejects. A defect is a
+          // dropped frame, counted rather than reported.
+          void forwardSharedTexture(texture.textureInfo, target, [sourceId]).then((defect) => {
+            if (defect && isCurrent()) entry.drops += 1;
+          });
+        }
+      } finally {
+        texture.release();
+      }
+    });
+
+    wc.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (isMainFrame) {
+        console.warn(`[hive] url source ${sourceId} failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
+      }
+    });
+    wc.on("render-process-gone", (_event, details) => {
+      console.error(`[hive] url source ${sourceId} renderer gone: ${details.reason} (${details.exitCode})`);
+      if (!isCurrent() || entry.reloadTimer) return;
+      entry.reloadTimer = setTimeout(() => {
+        entry.reloadTimer = null;
+        if (isCurrent() && !win.isDestroyed()) wc.reload();
+      }, RELOAD_AFTER_CRASH_MS);
+    });
+
+    wc.setFrameRate(fps);
+    wc.loadURL(url).catch((err: unknown) => {
+      console.warn(`[hive] url source ${sourceId} loadURL failed:`, err);
+    });
+  }
+
+  close(sourceId: string): void {
+    const entry = this.sources.get(sourceId);
+    if (!entry) return;
+    this.sources.delete(sourceId);
+    if (entry.reloadTimer) clearTimeout(entry.reloadTimer);
+    if (!entry.win.isDestroyed()) entry.win.destroy();
+  }
+
+  droppedFrames(sourceId: string): number {
+    return this.sources.get(sourceId)?.drops ?? 0;
+  }
+
+  dispose(): void {
+    for (const id of [...this.sources.keys()]) this.close(id);
+  }
+}
+
