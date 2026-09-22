@@ -72,7 +72,7 @@ export class CaptureManager {
    * Replace the source list. New sources report idle. A source that is unavailable
    * and not open is reset to idle too, so re-sending the list (e.g. after the user
    * re-picks the same window or device) lets the next subscriber try again.
-   * `waiting` is left alone: Spout discovery owns that transition.
+   * `waiting` is left alone: `setAvailability` owns that transition.
    */
   setSources(sources: SourceConfig[]): void {
     const prev = this.sources;
@@ -159,6 +159,33 @@ export class CaptureManager {
     if (entry.refs > 0) return;
     this.teardown(sourceId, entry);
     if (this.sources.has(sourceId)) this.report(sourceId, "idle");
+  }
+
+  /**
+   * A Spout sender appeared or disappeared (source id already mapped from sender name
+   * by the caller). Unavailable: report `waiting`, tearing down and ending sessions if
+   * the source was open or still opening - same fate as a config change or a dying
+   * track. Available: only a source parked in `waiting` moves, back to `idle`, so the
+   * next subscriber can try again. Repeated calls with the same value are a no-op past
+   * the first, since `applySources` re-reports availability on every sync.
+   */
+  setAvailability(sourceId: string, available: boolean): void {
+    if (!this.sources.has(sourceId)) return;
+    if (available) {
+      if (this.statuses.get(sourceId) === "waiting" && !this.active.has(sourceId)) {
+        this.report(sourceId, "idle");
+      }
+      return;
+    }
+    const entry = this.active.get(sourceId);
+    if (entry) {
+      this.teardown(sourceId, entry);
+      this.report(sourceId, "waiting");
+      this.opts.onEnded(sourceId);
+      return;
+    }
+    if (this.statuses.get(sourceId) === "waiting") return;
+    this.report(sourceId, "waiting");
   }
 
   private report(sourceId: string, status: SourceStatus): void {
