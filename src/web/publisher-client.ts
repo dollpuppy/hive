@@ -1,11 +1,6 @@
 import type { EncodingParams } from "../shared/presets";
-import {
-  PUBLISHER_REPLACED_CLOSE_CODE,
-  type IceServer,
-  type PublisherOutbound,
-  type SignalPayload,
-  type SourceStatus,
-} from "../shared/protocol";
+import { PUBLISHER_REPLACED_CLOSE_CODE } from "../shared/close-codes";
+import type { IceServer, PublisherOutbound, SignalPayload, SourceStatus } from "../shared/protocol";
 import { preferCodecs } from "./codecs";
 import { fromIcePayload, toIcePayload } from "./signal";
 import { StruggleTracker } from "./struggle-tracker";

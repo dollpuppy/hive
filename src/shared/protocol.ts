@@ -2,8 +2,7 @@ import { z } from "zod";
 
 export const PROTOCOL_VERSION = 1;
 export const MAX_MESSAGE_CHARS = 256 * 1024;
-/** WebSocket close code sent to a publisher superseded by a newer one; it must not reconnect. */
-export const PUBLISHER_REPLACED_CLOSE_CODE = 4001;
+export { PUBLISHER_REPLACED_CLOSE_CODE } from "./close-codes";
 
 export const sourceKindSchema = z.enum(["window", "webcam", "spout", "url"]);
 export const sourceStatusSchema = z.enum(["live", "idle", "waiting", "unavailable"]);
