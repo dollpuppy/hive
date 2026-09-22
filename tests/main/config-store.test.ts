@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -57,5 +57,23 @@ describe("config store", () => {
   it("writes pretty JSON", async () => {
     await saveConfig(file, defaultConfig());
     expect(await readFile(file, "utf8")).toContain('\n  "version": 1');
+  });
+
+  it("backs up and resets a top-level array", async () => {
+    await saveConfig(file, defaultConfig());
+    await writeFile(file, JSON.stringify([1, 2, 3]));
+    expect(await loadConfig(file)).toEqual(defaultConfig());
+    const files = await readdir(join(dir, "nested"));
+    expect(files.some((f) => f.startsWith("config.json.corrupt-"))).toBe(true);
+  });
+
+  it("saves successfully even when the target file is briefly locked", async () => {
+    await saveConfig(file, defaultConfig());
+    const handle = await open(file, "r");
+    setTimeout(() => {
+      void handle.close();
+    }, 50);
+    await saveConfig(file, { ...defaultConfig(), displayName: "Locked" });
+    expect(await loadConfig(file)).toEqual({ ...defaultConfig(), displayName: "Locked" });
   });
 });

@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
 
@@ -72,7 +72,8 @@ export async function loadConfig(file: string): Promise<HiveConfig> {
     await backupCorrupt(file);
     return defaultConfig();
   }
-  const merged = typeof data === "object" && data !== null ? { ...defaultConfig(), ...data } : data;
+  const merged =
+    typeof data === "object" && data !== null && !Array.isArray(data) ? { ...defaultConfig(), ...data } : data;
   const result = configSchema.safeParse(merged);
   if (!result.success) {
     await backupCorrupt(file);
@@ -81,9 +82,34 @@ export async function loadConfig(file: string): Promise<HiveConfig> {
   return result.data;
 }
 
+const RETRYABLE_RENAME_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+const RENAME_RETRY_DELAYS_MS = [20, 40, 80, 160];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (const delay of RENAME_RETRY_DELAYS_MS) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (err) {
+      if (!RETRYABLE_RENAME_CODES.has((err as NodeJS.ErrnoException).code ?? "")) throw err;
+      await sleep(delay);
+    }
+  }
+  await rename(from, to);
+}
+
 export async function saveConfig(file: string, config: HiveConfig): Promise<void> {
   await mkdir(dirname(file), { recursive: true });
   const tmp = `${file}.tmp`;
   await writeFile(tmp, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-  await rename(tmp, file);
+  try {
+    await renameWithRetry(tmp, file);
+  } catch (err) {
+    await rm(tmp, { force: true });
+    throw err;
+  }
 }
