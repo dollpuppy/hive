@@ -1,10 +1,27 @@
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { connect } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Hub } from "../../../src/main/hub/hub";
 import { startLocalServer, type LocalServer } from "../../../src/main/hub/local-server";
 import { staticRoute, viewerRoute } from "../../../src/main/hub/static-files";
+
+/** Sends a raw HTTP request that bypasses fetch/URL normalization, and returns the status code. */
+function rawGetStatus(port: number, rawPath: string): Promise<number> {
+  return new Promise((resolvePromise, reject) => {
+    const socket = connect(port, "127.0.0.1", () => {
+      socket.write(`GET ${rawPath} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`);
+    });
+    let data = "";
+    socket.on("data", (chunk) => (data += chunk.toString()));
+    socket.on("end", () => {
+      const match = /^HTTP\/1\.[01] (\d{3})/.exec(data);
+      match ? resolvePromise(Number(match[1])) : reject(new Error(`no status line: ${data}`));
+    });
+    socket.on("error", reject);
+  });
+}
 
 let server: LocalServer;
 let base: string;
@@ -66,5 +83,16 @@ describe("static files", () => {
   it("never serves staticRoute prefixes through the tunnel", async () => {
     const res = await fetch(`${base}/harness/index.html`, { headers: { "cf-connecting-ip": "1.2.3.4" } });
     expect(res.status).toBe(404);
+  });
+  it("blocks un-normalized traversal paths on the raw wire, bypassing fetch's own normalization", async () => {
+    const paths = [
+      "/viewer/%2e%2e/%2e%2e/hive-secret.txt",
+      "/viewer/../../hive-secret.txt",
+      "/viewer/C:%5cWindows%5cwin.ini",
+      "/viewer/index.html%00.js",
+    ];
+    for (const path of paths) {
+      expect(await rawGetStatus(server.port, path)).toBe(404);
+    }
   });
 });
