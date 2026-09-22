@@ -5,6 +5,7 @@ import { CaptureError, CaptureManager, type Capture, type Opener } from "../../s
 class FakeTrack {
   stopped = false;
   contentHint = "";
+  readyState: "live" | "ended" = "live";
   private listeners: (() => void)[] = [];
   stop(): void { this.stopped = true; }
   addEventListener(_: "ended", l: () => void): void { this.listeners.push(l); }
@@ -121,6 +122,30 @@ describe("CaptureManager", () => {
     f.track.end();
     expect(statuses.at(-1)).toEqual(["g", "unavailable"]);
     expect(ended).toEqual(["g"]);
+  });
+
+  it("fails the open when the track has already ended", async () => {
+    const rec = recordingOpener();
+    let deadOnArrival = true;
+    const { mgr, statuses, ended } = setup(async (source) => {
+      const c = await rec.opener(source);
+      if (deadOnArrival) rec.made.at(-1)!.track.readyState = "ended";
+      return c;
+    });
+    const a = mgr.acquire("g");
+    const b = mgr.acquire("g");
+    await expect(a).rejects.toThrow("capture ended");
+    await expect(b).rejects.toThrow("capture ended");
+    expect(statuses.at(-1)).toEqual(["g", "unavailable"]);
+    expect(statuses.some(([, s]) => s === "live")).toBe(false);
+    expect(ended).toEqual([]);
+    expect(rec.made[0]!.track.stopped).toBe(true);
+    expect(rec.disposed()).toBe(1);
+    // No refs were orphaned: a fresh capture stops on its own single release.
+    deadOnArrival = false;
+    await mgr.acquire("g");
+    mgr.release("g");
+    expect(rec.made[1]!.track.stopped).toBe(true);
   });
 
   it("acquire after a track ended re-opens a fresh capture", async () => {

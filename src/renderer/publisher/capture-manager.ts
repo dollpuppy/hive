@@ -102,12 +102,22 @@ export class CaptureManager {
           capture.dispose?.();
           throw new Error("capture stopped");
         }
-        entry.resolved = capture;
         const track = stream.getVideoTracks()[0];
         if (track) {
           track.contentHint = contentHintFor(source.kind);
           track.addEventListener("ended", () => this.onTrackEnded(sourceId, entry));
+          if (track.readyState === "ended") {
+            // Died before we could listen ("ended" never fires for it). Nobody holds this
+            // stream yet, so fail the open like an opener error: waiters reject, no release follows.
+            entry.stopped = true;
+            if (this.active.get(sourceId) === entry) this.active.delete(sourceId);
+            stream.getTracks().forEach((t) => t.stop());
+            capture.dispose?.();
+            this.opts.onStatus(sourceId, "unavailable");
+            throw new CaptureError("unavailable", "capture ended as it opened");
+          }
         }
+        entry.resolved = capture;
         this.opts.onStatus(sourceId, "live");
         return stream;
       },

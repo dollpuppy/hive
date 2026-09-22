@@ -12,7 +12,14 @@ const api: HivePublisherApi = window.hivePublisher;
 
 let sources: SourceConfig[] = [];
 
-const client = new PublisherClient({
+// The manager and client call into each other; the arrow callbacks only run after both exist.
+const captures: CaptureManager = new CaptureManager({
+  openers: { window: openWindow, webcam: openWebcam },
+  onStatus: (id, status) => client.reportStatus(id, status),
+  onEnded: (id) => client.endSource(id),
+});
+
+const client: PublisherClient = new PublisherClient({
   url: `ws://127.0.0.1:${port}/local/publisher?token=${encodeURIComponent(token)}`,
   acquire: (id) => captures.acquire(id),
   release: (id) => captures.release(id),
@@ -22,16 +29,22 @@ const client = new PublisherClient({
   },
 });
 
-const captures = new CaptureManager({
-  openers: { window: openWindow, webcam: openWebcam },
-  onStatus: (id, status) => client.reportStatus(id, status),
-  onEnded: (id) => client.endSource(id),
-});
-
-sources = await api.getSources();
-captures.setSources(sources);
-api.onSourcesChanged((next) => {
+function applySources(next: SourceConfig[]): void {
   sources = next;
   captures.setSources(next);
+}
+
+// Listen before fetching so a change pushed during the fetch is not lost; a pushed list
+// is newer than the fetched one, so the fetch result is dropped once a push has arrived.
+let pushed = false;
+api.onSourcesChanged((next) => {
+  pushed = true;
+  applySources(next);
 });
+try {
+  const initial = await api.getSources();
+  if (!pushed) applySources(initial);
+} catch (err) {
+  console.error("hive publisher: could not load sources", err);
+}
 client.start();

@@ -1,4 +1,4 @@
-import { ipcRenderer } from "electron";
+import { ipcRenderer, type IpcRendererEvent } from "electron";
 import type { SourceConfig } from "../main/config/config-store";
 import type { HivePublisherApi } from "../shared/publisher-api";
 
@@ -7,7 +7,11 @@ import type { HivePublisherApi } from "../shared/publisher-api";
 const api: HivePublisherApi = {
   getSources: () => ipcRenderer.invoke("hive:publisher:get-sources") as Promise<SourceConfig[]>,
   onSourcesChanged: (listener) => {
-    ipcRenderer.on("hive:publisher:sources", (_e, sources: SourceConfig[]) => listener(sources));
+    const handler = (_e: IpcRendererEvent, sources: SourceConfig[]): void => listener(sources);
+    ipcRenderer.on("hive:publisher:sources", handler);
+    return () => {
+      ipcRenderer.removeListener("hive:publisher:sources", handler);
+    };
   },
   selectWindow: (title) => ipcRenderer.invoke("hive:publisher:select-window", title) as Promise<void>,
 };
