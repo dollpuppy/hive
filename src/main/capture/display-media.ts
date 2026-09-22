@@ -3,6 +3,7 @@ import {
   ipcMain,
   session,
   webContents as WebContentsStatic,
+  type DesktopCapturerSource,
   type IpcMainInvokeEvent,
   type Streams,
   type WebContents,
@@ -24,8 +25,18 @@ function isPublisherMainFrame(publisher: WebContents, frame: WebFrameMain | null
   return frame.parent === null && WebContentsStatic.fromFrame(frame) === publisher;
 }
 
-function isFromPublisher(publisher: WebContents, event: IpcMainInvokeEvent): boolean {
+/** True when an IPC invoke came from the Publisher's top-level frame. */
+export function isFromPublisher(publisher: WebContents, event: IpcMainInvokeEvent): boolean {
   return !publisher.isDestroyed() && event.sender === publisher && isPublisherMainFrame(publisher, event.senderFrame);
+}
+
+async function findSource(title: string): Promise<DesktopCapturerSource | undefined> {
+  const noThumb = { width: 0, height: 0 };
+  const windows = await desktopCapturer.getSources({ types: ["window"], thumbnailSize: noThumb });
+  const win = windows.find((s) => s.name === title);
+  if (win) return win;
+  const screens = await desktopCapturer.getSources({ types: ["screen"], thumbnailSize: noThumb });
+  return screens.find((s) => s.name === title);
 }
 
 /**
@@ -60,12 +71,10 @@ export function installDisplayMediaHandler(publisher: WebContents): void {
     if (!isPublisherMainFrame(publisher, request.frame) || !request.videoRequested) return answer(null);
     if (!selection || Date.now() > selection.expires) return answer(null);
 
-    desktopCapturer
-      .getSources({ types: ["window", "screen"], thumbnailSize: { width: 0, height: 0 } })
-      .then((sources) => {
-        const match = sources.find((s) => s.name === selection.title);
-        answer(match ? { video: { id: match.id, name: match.name } } : null);
-      })
+    // Windows first: a window titled like a screen ("Screen 1") must not lose to the screen.
+    // Screens are only a fallback, for sources whose title names a whole display.
+    findSource(selection.title)
+      .then((match) => answer(match ? { video: { id: match.id, name: match.name } } : null))
       .catch((err: unknown) => {
         console.error("[hive] desktopCapturer.getSources failed:", err);
         answer(null);

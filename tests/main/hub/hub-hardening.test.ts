@@ -51,6 +51,32 @@ describe("Hub hardening", () => {
     });
   });
 
+  describe("publisher event", () => {
+    it("emits true on attach and false when the publisher closes", () => {
+      const host = makeHost();
+      const events: boolean[] = [];
+      host.on("publisher", (connected: boolean) => events.push(connected));
+      const handler = host.attachPublisher(new FakeChannel());
+      expect(events).toEqual([true]);
+      handler.onClose();
+      expect(events).toEqual([true, false]);
+      expect(host.hasPublisher).toBe(false);
+    });
+
+    it("emits true (and no false) when a publisher is replaced, ignoring the old one's close", () => {
+      const host = makeHost();
+      const events: boolean[] = [];
+      host.on("publisher", (connected: boolean) => events.push(connected));
+      const handler1 = host.attachPublisher(new FakeChannel());
+      const handler2 = host.attachPublisher(new FakeChannel());
+      handler1.onClose();
+      expect(events).toEqual([true, true]);
+      expect(host.hasPublisher).toBe(true);
+      handler2.onClose();
+      expect(events).toEqual([true, true, false]);
+    });
+  });
+
   describe("joiner-side handshake", () => {
     it("rejects a second outgoing connection when already partnered, without touching the existing partner", async () => {
       const a = makeHost();

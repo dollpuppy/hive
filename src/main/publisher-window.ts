@@ -11,7 +11,12 @@ export function rendererDevUrl(): string | undefined {
   return app.isPackaged ? undefined : process.env.ELECTRON_RENDERER_URL || undefined;
 }
 
-const RELOAD_DELAY_MS = 1000;
+const RELOAD_BASE_DELAY_MS = 1000;
+const RELOAD_MAX_DELAY_MS = 30_000;
+/** A reload that stays up this long resets the backoff. */
+const STABLE_MS = 30_000;
+const CRASH_WINDOW_MS = 120_000;
+const MAX_CRASHES = 5;
 
 export function createPublisherWindow(opts: PublisherWindowOptions): BrowserWindow {
   const win = new BrowserWindow({
@@ -52,19 +57,52 @@ export function createPublisherWindow(opts: PublisherWindowOptions): BrowserWind
     loading.catch(() => undefined);
   };
 
+  // Crash recovery: reload with exponential backoff; the backoff resets once a reload has
+  // stayed up for STABLE_MS; too many crashes in CRASH_WINDOW_MS and we stop trying.
   let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+  let stableTimer: ReturnType<typeof setTimeout> | null = null;
+  let delay = RELOAD_BASE_DELAY_MS;
+  let crashes: number[] = [];
+  let gaveUp = false;
+  const clearTimers = (): void => {
+    if (reloadTimer) clearTimeout(reloadTimer);
+    if (stableTimer) clearTimeout(stableTimer);
+    reloadTimer = stableTimer = null;
+  };
+
+  wc.on("did-finish-load", () => {
+    if (stableTimer) clearTimeout(stableTimer);
+    stableTimer = setTimeout(() => {
+      stableTimer = null;
+      delay = RELOAD_BASE_DELAY_MS;
+    }, STABLE_MS);
+  });
   wc.on("render-process-gone", (_e, details) => {
-    console.error(`[hive] publisher renderer gone (${details.reason}, exit ${details.exitCode}); reloading`);
+    if (gaveUp) return;
+    if (stableTimer) clearTimeout(stableTimer);
+    stableTimer = null;
+    const now = Date.now();
+    crashes = [...crashes.filter((t) => now - t < CRASH_WINDOW_MS), now];
+    if (crashes.length >= MAX_CRASHES) {
+      gaveUp = true;
+      clearTimers();
+      console.error(
+        `[hive] publisher renderer gone (${details.reason}, exit ${details.exitCode}); ` +
+          `${crashes.length} crashes in ${CRASH_WINDOW_MS / 1000} s — giving up, publishing is stopped until restart`,
+      );
+      return;
+    }
     if (reloadTimer) return;
+    console.error(
+      `[hive] publisher renderer gone (${details.reason}, exit ${details.exitCode}); reloading in ${delay / 1000} s`,
+    );
     reloadTimer = setTimeout(() => {
       reloadTimer = null;
       if (!win.isDestroyed()) load();
-    }, RELOAD_DELAY_MS);
+    }, delay);
+    delay = Math.min(delay * 2, RELOAD_MAX_DELAY_MS);
   });
-  win.on("closed", () => {
-    if (reloadTimer) clearTimeout(reloadTimer);
-    reloadTimer = null;
-  });
+  win.on("closed", clearTimers);
 
   load();
   return win;

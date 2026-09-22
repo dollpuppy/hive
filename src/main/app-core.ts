@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { app, ipcMain, type BrowserWindow } from "electron";
 import { iceServersFromTurn, sourceInfoFromConfig } from "../shared/source-info";
-import { installDisplayMediaHandler } from "./capture/display-media";
+import { installDisplayMediaHandler, isFromPublisher } from "./capture/display-media";
 import { loadConfig, saveConfig, type HiveConfig } from "./config/config-store";
 import { Hub } from "./hub/hub";
 import { joinPartner, type JoinHandle } from "./hub/joiner";
@@ -35,9 +35,16 @@ export function devOrigins(): string[] {
 
 export async function startAppCore(argv: string[]): Promise<AppCore> {
   const configPath = join(app.getPath("userData"), "config.json");
-  const config = await loadConfig(configPath);
+  let config = await loadConfig(configPath);
   const inviteSecret = config.keepSecret && config.secret ? config.secret : generateSecret();
-  if (config.keepSecret && !config.secret) await saveConfig(configPath, { ...config, secret: inviteSecret });
+  if (config.keepSecret && !config.secret) {
+    config = { ...config, secret: inviteSecret };
+    await saveConfig(configPath, config);
+  } else if (!config.keepSecret && config.secret !== null) {
+    // A secret that isn't being kept must not linger on disk.
+    config = { ...config, secret: null };
+    await saveConfig(configPath, config);
+  }
 
   const hub = new Hub({
     displayName: config.displayName,
@@ -62,15 +69,14 @@ export async function startAppCore(argv: string[]): Promise<AppCore> {
   const publisher = createPublisherWindow({ port: server.port, token: publisherToken });
   const publisherContents = publisher.webContents;
   ipcMain.handle("hive:publisher:get-sources", (event) => {
-    if (publisherContents.isDestroyed() || event.sender !== publisherContents || event.senderFrame?.parent !== null) {
-      throw new Error("forbidden");
-    }
+    if (!isFromPublisher(publisherContents, event)) throw new Error("forbidden");
     return config.sources;
   });
   installDisplayMediaHandler(publisherContents);
 
   console.log(`[hive] local server http://127.0.0.1:${server.port}`);
-  console.log(`[hive] local invite  http://127.0.0.1:${server.port}/join#${inviteSecret}`);
+  // The invite carries the secret; only print it in development.
+  if (!app.isPackaged) console.log(`[hive] local invite  http://127.0.0.1:${server.port}/join#${inviteSecret}`);
 
   const joinArg = argv.find((a) => a.startsWith("--join="));
   const joinHandle = joinArg

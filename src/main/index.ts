@@ -9,30 +9,45 @@ if (profileArg !== undefined) {
   else console.error(`[hive] ignoring invalid --profile value (use 1-32 of A-Z a-z 0-9 _ -)`);
 }
 
-app.on("window-all-closed", () => {
-  // The Publisher window is hidden; the app lives until explicitly quit (dashboard in Plan 4).
-});
+// One instance per profile: the lock is scoped to the userData directory set above.
+if (!app.requestSingleInstanceLock()) {
+  console.error(`[hive] another Hive instance is already running with this profile (${app.getPath("userData")}); exiting`);
+  app.exit(0);
+} else {
+  run();
+}
 
-let core: AppCore | null = null;
-let quitting = false;
-
-app.on("before-quit", (e) => {
-  if (!core || quitting) return;
-  // Hold the quit until the Hub has said goodbye and the server is closed.
-  e.preventDefault();
-  quitting = true;
-  core
-    .shutdown()
-    .catch((err: unknown) => console.error("[hive] shutdown failed:", err))
-    .finally(() => app.quit());
-});
-
-app
-  .whenReady()
-  .then(async () => {
-    core = await startAppCore(process.argv);
-  })
-  .catch((err: unknown) => {
-    console.error("[hive] startup failed:", err);
-    app.exit(1);
+function run(): void {
+  app.on("window-all-closed", () => {
+    // The Publisher window is hidden; the app lives until explicitly quit (dashboard in Plan 4).
   });
+
+  let startup: Promise<AppCore> | null = null;
+  let shutdownStarted = false;
+
+  app.on("before-quit", (e) => {
+    if (!startup || shutdownStarted) return;
+    // Hold the quit until startup has finished (so everything it created is torn down)
+    // and the Hub has said goodbye and the server is closed.
+    e.preventDefault();
+    shutdownStarted = true;
+    startup
+      .then((core) => core.shutdown())
+      .catch((err: unknown) => console.error("[hive] shutdown failed:", err))
+      .finally(() => app.quit());
+  });
+
+  // Ctrl+C in the terminal / termination: go through before-quit so shutdown runs.
+  for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => app.quit());
+
+  app
+    .whenReady()
+    .then(() => {
+      startup = startAppCore(process.argv);
+      return startup;
+    })
+    .catch((err: unknown) => {
+      console.error("[hive] startup failed:", err);
+      app.exit(1);
+    });
+}
