@@ -6,8 +6,8 @@ import { CaptureManager } from "./capture-manager";
 import { openWebcam, openWindow } from "./openers";
 
 const params = new URLSearchParams(location.search);
-const port = params.get("port") ?? "7420";
-const token = params.get("token") ?? "";
+const port = params.get("port");
+const token = params.get("token");
 const api: HivePublisherApi = window.hivePublisher;
 
 let sources: SourceConfig[] = [];
@@ -20,7 +20,7 @@ const captures: CaptureManager = new CaptureManager({
 });
 
 const client: PublisherClient = new PublisherClient({
-  url: `ws://127.0.0.1:${port}/local/publisher?token=${encodeURIComponent(token)}`,
+  url: `ws://127.0.0.1:${port ?? ""}/local/publisher?token=${encodeURIComponent(token ?? "")}`,
   acquire: (id) => captures.acquire(id),
   release: (id) => captures.release(id),
   encodingFor: (id) => {
@@ -47,4 +47,9 @@ try {
 } catch (err) {
   console.error("hive publisher: could not load sources", err);
 }
-client.start();
+if (!port || !token) {
+  // Main always passes both; without them the client would dial the wrong server or be refused forever.
+  console.error("hive publisher: missing port or token in the page URL; not connecting");
+} else {
+  client.start();
+}
