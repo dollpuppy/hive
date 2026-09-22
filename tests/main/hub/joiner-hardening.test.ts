@@ -187,6 +187,22 @@ describe("joinPartner hardening", () => {
     expect(statuses).not.toContain("failed");
   });
 
+  it("stops the joiner instead of reconnecting when the joining side kicks its own partner", async () => {
+    const h = await host();
+    const j = joiner();
+    const statuses: JoinStatus[] = [];
+    const join = joinPartner({ hub: j, invite: `http://127.0.0.1:${h.server.port}/join#S`, onStatus: (s) => statuses.push(s) });
+    cleanups.push(() => join.stop());
+    await waitFor(() => j.partner !== null);
+
+    j.kick();
+    await new Promise((r) => setTimeout(r, 2500));
+
+    expect(statuses.filter((s) => s === "connected")).toHaveLength(1);
+    expect(statuses.at(-1)).toBe("stopped");
+    expect(h.hub.partner).toBeNull();
+  });
+
   it("reports the last-seen rejection reason instead of 'unreachable' when the window runs out", async () => {
     const first = await host();
     const port = first.server.port;

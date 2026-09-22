@@ -57,6 +57,7 @@ export function joinPartner(opts: JoinOptions): JoinHandle {
     hub.off("partner", onPartner);
     hub.off("rejected", onRejected);
     hub.off("kicked", onKicked);
+    hub.off("kicked-partner", onKickedPartner);
     if (timer) clearTimeout(timer);
     timer = null;
     clearWelcomeTimer();
@@ -96,9 +97,15 @@ export function joinPartner(opts: JoinOptions): JoinHandle {
     if (!linked) return;
     finish("rejected", "kicked");
   };
+  const onKickedPartner = (): void => {
+    if (!linked) return;
+    finish("stopped");
+    socket?.terminate();
+  };
   hub.on("partner", onPartner);
   hub.on("rejected", onRejected);
   hub.on("kicked", onKicked);
+  hub.on("kicked-partner", onKickedPartner);
 
   const scheduleRetry = (): void => {
     if (done) return;

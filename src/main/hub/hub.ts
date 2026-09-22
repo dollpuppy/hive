@@ -154,6 +154,7 @@ export class Hub extends EventEmitter {
     const link = this.peer;
     if (!link) return;
     link.channel.send({ type: "kick", reason });
+    this.emit("kicked-partner");
     link.channel.close(1000, "kicked");
     this.onPeerClose(link);
   }
