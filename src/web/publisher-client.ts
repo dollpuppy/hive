@@ -93,11 +93,15 @@ export class PublisherClient {
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
-  private readonly pendingStatus = new Map<string, SourceStatus>();
+  private readonly lastStatus = new Map<string, SourceStatus>();
+  /** Mirrors the tracker's state so it can be re-sent after a reconnect. */
+  private struggling = false;
+  private sampling = false;
 
   constructor(private readonly opts: PublisherClientOptions) {}
 
   start(): void {
+    if (this.healthTimer) return;
     this.stopped = false;
     this.connect();
     this.healthTimer = setInterval(() => void this.sampleHealth(), 2000);
@@ -110,7 +114,7 @@ export class PublisherClient {
   }
 
   reportStatus(sourceId: string, status: SourceStatus): void {
-    this.pendingStatus.set(sourceId, status);
+    this.lastStatus.set(sourceId, status);
     this.send({ type: "source-status", sourceId, status });
   }
 
@@ -137,7 +141,8 @@ export class PublisherClient {
     const ws = new WebSocket(this.opts.url);
     this.ws = ws;
     ws.onopen = () => {
-      for (const [sourceId, status] of this.pendingStatus) this.send({ type: "source-status", sourceId, status });
+      for (const [sourceId, status] of this.lastStatus) this.send({ type: "source-status", sourceId, status });
+      this.send({ type: "health", struggling: this.struggling });
     };
     ws.onmessage = (ev) => {
       let msg: PublisherOutbound;
@@ -180,8 +185,9 @@ export class PublisherClient {
   }
 
   private async onSubscribe(subId: string, sourceId: string, iceServers: IceServer[]): Promise<void> {
+    if (this.entries.has(subId)) return;
     const encoding = this.opts.encodingFor(sourceId);
-    if (!encoding || this.entries.has(subId)) {
+    if (!encoding) {
       this.send({ type: "unsubscribe", subId });
       return;
     }
@@ -201,13 +207,20 @@ export class PublisherClient {
       this.opts.release(sourceId);
       return;
     }
-    entry.session = new PublisherSession(subId, stream, encoding, iceServers, (m) => this.send(m), () =>
-      this.end(subId, true),
-    );
+    const isCurrent = (): boolean => this.entries.get(subId) === entry;
     try {
+      entry.session = new PublisherSession(subId, stream, encoding, iceServers, (m) => this.send(m), () => {
+        if (isCurrent()) this.end(subId, true);
+      });
       await entry.session.start();
     } catch {
-      this.end(subId, true);
+      // Construction (e.g. a malformed TURN URL) or offer creation failed. If the entry was
+      // already ended meanwhile, end() closed the session and released the stream.
+      if (!isCurrent()) return;
+      this.entries.delete(subId);
+      entry.session?.close();
+      this.opts.release(sourceId);
+      this.send({ type: "unsubscribe", subId });
     }
   }
 
@@ -225,12 +238,21 @@ export class PublisherClient {
   }
 
   private async sampleHealth(): Promise<void> {
-    const sessions = [...this.entries.values()].flatMap((e) => (e.session ? [e.session] : []));
-    let limited = false;
-    for (const s of sessions) {
-      if (await s.bandwidthLimited().catch(() => false)) limited = true;
+    if (this.sampling) return;
+    this.sampling = true;
+    try {
+      const sessions = [...this.entries.values()].flatMap((e) => (e.session ? [e.session] : []));
+      let limited = false;
+      for (const s of sessions) {
+        if (await s.bandwidthLimited().catch(() => false)) limited = true;
+      }
+      const change = this.tracker.sample(limited, Date.now());
+      if (change !== null) {
+        this.struggling = change;
+        this.send({ type: "health", struggling: change });
+      }
+    } finally {
+      this.sampling = false;
     }
-    const change = this.tracker.sample(limited, Date.now());
-    if (change !== null) this.send({ type: "health", struggling: change });
   }
 }
