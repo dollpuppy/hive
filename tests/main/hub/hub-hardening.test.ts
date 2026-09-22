@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Hub } from "../../../src/main/hub/hub";
-import { PROTOCOL_VERSION } from "../../../src/shared/protocol";
+import { PROTOCOL_VERSION, PUBLISHER_REPLACED_CLOSE_CODE } from "../../../src/shared/protocol";
 import { FakeChannel, connectHubs, flush, source } from "./fakes";
 
 const makeHost = (secret: string | null = "S") =>
@@ -24,6 +24,17 @@ describe("Hub hardening", () => {
 
       expect(viewer.last("ended")).toBeDefined();
       expect(pub1.closed).toBe(true);
+    });
+
+    it("closes the replaced publisher with the dedicated close code", () => {
+      const host = makeHost();
+      const pub1 = new FakeChannel();
+      host.attachPublisher(pub1);
+      host.attachPublisher(new FakeChannel());
+
+      expect(pub1.closed).toBe(true);
+      expect(pub1.closeCode).toBe(PUBLISHER_REPLACED_CLOSE_CODE);
+      expect(PUBLISHER_REPLACED_CLOSE_CODE).toBe(4001);
     });
 
     it("ignores messages from a replaced publisher", () => {

@@ -7,6 +7,7 @@ import {
   publisherInboundSchema,
   viewerInboundSchema,
   PROTOCOL_VERSION,
+  PUBLISHER_REPLACED_CLOSE_CODE,
   type IceServer,
   type PeerMessage,
   type PublisherOutbound,
@@ -422,7 +423,7 @@ export class Hub extends EventEmitter {
       for (const [subId, sub] of [...this.subs]) {
         if (sub.target === "publisher") this.endSub(subId, "publisher");
       }
-      old.close(1000, "replaced");
+      old.close(PUBLISHER_REPLACED_CLOSE_CODE, "replaced");
     }
     this.publisher = channel;
     return {
