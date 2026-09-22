@@ -29,7 +29,7 @@ export const SELF_SLUG = "me";
  * partner — a local race, not something the remote host told us — so it must stay distinct
  * from a remote "full" rejection (which is retryable; see joiner.ts).
  */
-type LocalRejectReason = RejectReason | "already-partnered";
+export type LocalRejectReason = RejectReason | "already-partnered";
 
 export interface Partner {
   name: string;

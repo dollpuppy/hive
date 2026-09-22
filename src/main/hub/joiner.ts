@@ -1,10 +1,13 @@
 import WebSocket from "ws";
 import { MAX_MESSAGE_CHARS } from "../../shared/protocol";
 import { parseInviteLink } from "../invite";
-import type { Hub, Partner } from "./hub";
+import type { Hub, LocalRejectReason, Partner } from "./hub";
 import { bindSocket, wsChannel } from "./local-server";
 
 export type JoinStatus = "connecting" | "connected" | "reconnecting" | "failed" | "rejected" | "stopped";
+
+/** Reasons a join status can carry a `detail`, beyond the wire-protocol reject reasons. */
+export type JoinDetail = LocalRejectReason | "kicked" | "invalid-link" | "unreachable";
 
 export interface JoinOptions {
   hub: Hub;
@@ -12,7 +15,7 @@ export interface JoinOptions {
   retryWindowMs?: number;
   /** How long to wait for "welcome" after the socket opens before giving up on this attempt. */
   welcomeTimeoutMs?: number;
-  onStatus: (status: JoinStatus, detail?: string) => void;
+  onStatus: (status: JoinStatus, detail?: JoinDetail) => void;
 }
 
 export interface JoinHandle {
@@ -44,14 +47,14 @@ export function joinPartner(opts: JoinOptions): JoinHandle {
   let delay = 1000;
   let deadline = Date.now() + windowMs;
   /** Last retryable rejection reason (e.g. "full") seen this cycle; reported instead of "unreachable" if the window runs out. */
-  let lastRejectReason: string | undefined;
+  let lastRejectReason: JoinDetail | undefined;
 
   const clearWelcomeTimer = (): void => {
     if (welcomeTimer) clearTimeout(welcomeTimer);
     welcomeTimer = null;
   };
 
-  const finish = (status: JoinStatus, detail?: string): void => {
+  const finish = (status: JoinStatus, detail?: JoinDetail): void => {
     if (done) return;
     done = true;
     hub.off("partner", onPartner);
@@ -84,7 +87,7 @@ export function joinPartner(opts: JoinOptions): JoinHandle {
       opts.onStatus("reconnecting");
     }
   };
-  const onRejected = (reason: string): void => {
+  const onRejected = (reason: LocalRejectReason): void => {
     // A host that's "full" because our own last link with it hasn't timed out yet is worth
     // retrying — the slot frees up once that stale link's heartbeat lapses.
     if (everConnected && reason === "full") {
