@@ -151,12 +151,12 @@ Inline hints:
 |---|---|
 | Window/Screen | Electron `desktopCapturer` source id → `getUserMedia({ video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId }}})` with frame-rate/size constraints from preset |
 | Webcam | `getUserMedia({ video: { deviceId, width, height, frameRate }})` |
-| Spout2 | texture-bridge `createSharedTextureReceiver({ senderName, target: publisherWindow })` → GPU-backed `VideoFrame` in Publisher (no CPU readback) → alpha packing (6.2) → `MediaStreamTrackGenerator`. Each `VideoFrame` is `close()`d after drawing. Sender picker is fed by `SenderDiscovery`. |
-| Browser URL | Offscreen BrowserWindow (`offscreen: true`) at configured size; `paint` event bitmap → `VideoFrame` → `MediaStreamTrackGenerator` (opaque) |
+| Spout2 | texture-bridge `createSharedTextureReceiver({ senderName, target: publisherWindow, extraArgs: [sourceId] })` routes each shared-texture frame to its Publisher-side consumer by `sourceId` (no CPU readback) → alpha packing (6.2) → `canvas.captureStream()`. texture-bridge's frame pool closes each `VideoFrame` after the synchronous handler returns; consumers never close it themselves. Sender picker is fed by `SenderDiscovery`. |
+| Browser URL | Rendered in an offscreen `BrowserWindow` with `useSharedTexture`; frames are forwarded zero-copy into the Publisher via `forwardSharedTexture` and drawn letterboxed onto a canvas → `canvas.captureStream()` (opaque) |
 
 ### 6.2 Alpha packing (Spout2 only)
 
-- **Sender:** WebGL on an `OffscreenCanvas` of size `2W × H`; the incoming `VideoFrame` is uploaded with `texImage2D` (GPU-to-GPU). Left half = RGB of the frame. Right half = alpha replicated into RGB as greyscale. Output feeds the track.
+- **Sender:** WebGL on an `HTMLCanvasElement` of size `2W × H`; the incoming `VideoFrame` is uploaded with `texImage2D` (GPU-to-GPU). Left half = RGB of the frame. Right half = alpha replicated into RGB as greyscale. The canvas is published via `canvas.captureStream()`.
 - **Receiver (viewer page):** WebGL shader samples RGB from `u ∈ [0, 0.5)` and alpha from the red channel at `u + 0.5`; draws to a transparent canvas sized `W × H`.
 - Bitrate for alpha sources = preset bitrate × 1.6.
 - `sources` message reports logical `width`/`height` (W × H), not packed size.
@@ -255,4 +255,4 @@ Optional alternative to the browser-source URL, per received source.
 - `/local/publisher` is protected by a per-launch token; `/local/viewer` by an Origin allowlist (own origin, `file://`, dev server). Chromium sends `Origin: file://` on WebSocket handshakes from `file:` pages.
 - Window capture: each open (select-window IPC + `getDisplayMedia()`) is serialized and times out after 10 s. Main grants display-media only to the Publisher's top-level frame, for a one-shot window selection that expires after 10 s.
 - Source status `idle` means ready (capture starts on first subscriber); `live` means capturing.
-- Planned (Plan 3): publisher frames from Spout/URL sources will be drawn to canvases and published with `canvas.captureStream()` rather than `MediaStreamTrackGenerator`.
+- Plan 3: publisher frames from Spout/URL sources are drawn to canvases and published with `canvas.captureStream()` rather than `MediaStreamTrackGenerator`.
