@@ -34,24 +34,39 @@ async function newPage(label: string): Promise<Page> {
 }
 
 /** Open a harness page and wait until the host Hub has attached *its* publisher socket. */
-async function openPublisher(label = "publisher", setup?: (page: Page) => void): Promise<Page> {
-  const attached = new Promise<void>((resolveAttached) => {
-    const onPublisher = (up: boolean): void => {
-      if (!up) return;
-      hostHub.off("publisher", onPublisher);
-      resolveAttached();
+async function openPublisher(label = "publisher", setup?: (page: Page) => void, ms = 15_000): Promise<Page> {
+  let onPublisher: ((up: boolean) => void) | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const attached = new Promise<void>((resolveAttached, rejectAttached) => {
+    onPublisher = (up: boolean): void => {
+      if (up) resolveAttached();
     };
     hostHub.on("publisher", onPublisher);
+    timer = setTimeout(() => rejectAttached(new Error(`${label}: publisher did not attach within ${ms} ms`)), ms);
   });
-  const page = await newPage(label);
-  setup?.(page);
-  await page.goto(`http://127.0.0.1:${hostServer.port}/harness/index.html?token=HT`);
-  await attached;
-  return page;
+  // Don't surface an unhandled rejection if goto() throws first.
+  attached.catch(() => undefined);
+  try {
+    const page = await newPage(label);
+    setup?.(page);
+    await page.goto(`http://127.0.0.1:${hostServer.port}/harness/index.html?token=HT`);
+    await attached;
+    return page;
+  } finally {
+    clearTimeout(timer);
+    if (onPublisher) hostHub.off("publisher", onPublisher);
+  }
 }
 
-const refs = (page: Page): Promise<number> =>
-  page.evaluate(() => (window as unknown as { harness: { refs: () => number } }).harness.refs());
+type HarnessWindow = { harness: { refs: () => number; acquired: () => string[] } };
+
+const refs = (page: Page): Promise<number> => page.evaluate(() => (window as unknown as HarnessWindow).harness.refs());
+
+const acquired = (page: Page): Promise<string[]> =>
+  page.evaluate(() => (window as unknown as HarnessWindow).harness.acquired());
+
+const refsDropToZero = (page: Page): Promise<unknown> =>
+  page.waitForFunction(() => (window as unknown as HarnessWindow).harness.refs() === 0, undefined, { timeout: 10_000 });
 
 beforeAll(async () => {
   await build({ configFile: resolve(root, "vite.viewer.config.ts"), logLevel: "warn" });
@@ -110,13 +125,10 @@ describe("media e2e", () => {
       { timeout: 20_000 },
     );
     expect(await refs(publisher)).toBe(1);
+    expect(await acquired(publisher)).toEqual(["src-game"]);
 
     await viewer.close();
-    await publisher.waitForFunction(
-      () => (window as unknown as { harness: { refs: () => number } }).harness.refs() === 0,
-      undefined,
-      { timeout: 10_000 },
-    );
+    await refsDropToZero(publisher);
   });
 
   it("local 'me' preview plays on the host", async () => {
@@ -132,6 +144,10 @@ describe("media e2e", () => {
       { timeout: 20_000 },
     );
     expect(await refs(publisher)).toBe(1);
+    expect(await acquired(publisher)).toEqual(["src-game"]);
+
+    await viewer.close();
+    await refsDropToZero(publisher);
   });
 
   it("viewer stays hidden (transparent) for an unknown source and keeps retrying", async () => {
@@ -141,10 +157,9 @@ describe("media e2e", () => {
       if (ws.url().endsWith("/local/viewer")) watches++;
     });
     await viewer.goto(`http://127.0.0.1:${joinServer.port}/s/ana/nothing`);
-    await new Promise((r) => setTimeout(r, 1500));
-    expect(await viewer.evaluate(() => (document.getElementById("stage") as HTMLVideoElement).hidden)).toBe(true);
     // First attempt immediately, the retry after ~1 s.
-    expect(watches).toBeGreaterThanOrEqual(2);
+    await until(() => watches >= 2, 5_000);
+    expect(await viewer.evaluate(() => (document.getElementById("stage") as HTMLVideoElement).hidden)).toBe(true);
   });
 
   it("a replaced publisher (close code 4001) does not reconnect and evict its successor", async () => {
@@ -161,7 +176,7 @@ describe("media e2e", () => {
         ws.on("close", () => firstClosed++);
       }),
     );
-    expect(firstSockets).toBe(1);
+    await until(() => firstSockets === 1, 5_000);
 
     hostHub.on("publisher", count);
     try {
@@ -183,6 +198,7 @@ describe("media e2e", () => {
         { timeout: 20_000 },
       );
       expect(await refs(second)).toBe(1);
+      expect(await acquired(second)).toEqual(["src-game"]);
       expect(await refs(first)).toBe(0);
     } finally {
       hostHub.off("publisher", count);

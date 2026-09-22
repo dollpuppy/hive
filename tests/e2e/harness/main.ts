@@ -19,16 +19,22 @@ for (const track of stream.getVideoTracks()) track.contentHint = contentHintFor(
 
 const token = new URLSearchParams(location.search).get("token") ?? "";
 let refs = 0;
+const acquired: string[] = [];
 const client = new PublisherClient({
   url: `ws://${location.host}/local/publisher?token=${encodeURIComponent(token)}`,
-  acquire: async () => {
+  acquire: async (sourceId) => {
+    acquired.push(sourceId);
     refs++;
     return stream;
   },
   release: () => {
     refs--;
   },
-  encodingFor: () => ({ maxBitrate: 1_000_000, maxFramerate: 30 }),
+  // Like production: unknown source ids get no encoding, so the client refuses the subscription.
+  encodingFor: (sourceId) => (sourceId === "src-game" ? { maxBitrate: 1_000_000, maxFramerate: 30 } : null),
 });
 client.start();
-(window as unknown as { harness: { refs: () => number } }).harness = { refs: () => refs };
+(window as unknown as { harness: { refs: () => number; acquired: () => string[] } }).harness = {
+  refs: () => refs,
+  acquired: () => [...acquired],
+};
