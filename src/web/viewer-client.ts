@@ -131,9 +131,16 @@ export class ViewerClient {
       .then(async () => {
         if (this.pc !== pc) return;
         if (payload.kind === "sdp" && payload.type === "offer") {
-          await pc.setRemoteDescription({ type: "offer", sdp: payload.sdp });
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
+          let answer: RTCSessionDescriptionInit;
+          try {
+            await pc.setRemoteDescription({ type: "offer", sdp: payload.sdp });
+            answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+          } catch {
+            // An SDP problem, not an ICE one: retry without the TURN hint.
+            if (this.pc === pc) this.retry();
+            return;
+          }
           if (this.pc !== pc) return;
           this.send({ type: "signal", subId, payload: { kind: "sdp", type: "answer", sdp: answer.sdp ?? "" } });
         } else if (payload.kind === "ice") {
