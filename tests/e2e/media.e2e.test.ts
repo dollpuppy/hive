@@ -51,6 +51,8 @@ async function openPublisher(label = "publisher", setup?: (page: Page) => void, 
     setup?.(page);
     await page.goto(`http://127.0.0.1:${hostServer.port}/harness/index.html?token=HT`);
     await attached;
+    // The Hub marks sources unavailable while no Publisher is connected; wait for this one's report.
+    await until(() => hostHub.sources[0]?.status === "idle", ms);
     return page;
   } finally {
     clearTimeout(timer);

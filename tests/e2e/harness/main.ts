@@ -33,6 +33,9 @@ const client = new PublisherClient({
   // Like production: unknown source ids get no encoding, so the client refuses the subscription.
   encodingFor: (sourceId) => (sourceId === "src-game" ? { maxBitrate: 1_000_000, maxFramerate: 30 } : null),
 });
+// Like production (CaptureManager reports idle for every configured source): the Hub marks
+// sources unavailable while no Publisher is connected, and this restores them on connect.
+client.reportStatus("src-game", "idle");
 client.start();
 (window as unknown as { harness: { refs: () => number; acquired: () => string[] } }).harness = {
   refs: () => refs,
