@@ -264,6 +264,67 @@ describe("CaptureManager", () => {
     });
   });
 
+  describe("unavailable recovery", () => {
+    it("re-sending the sources resets an unavailable source to idle", async () => {
+      const { mgr, statuses } = setup(async () => {
+        throw new CaptureError("unavailable", "window not found");
+      });
+      await expect(mgr.acquire("g")).rejects.toThrow();
+      mgr.setSources([game]);
+      expect(statuses.at(-1)).toEqual(["g", "idle"]);
+    });
+
+    it("resets a source whose track ended", async () => {
+      const rec = recordingOpener();
+      const { mgr, statuses } = setup(rec.opener);
+      await mgr.acquire("g");
+      rec.made[0]!.track.end();
+      expect(statuses.at(-1)).toEqual(["g", "unavailable"]);
+      mgr.setSources([game]);
+      expect(statuses.at(-1)).toEqual(["g", "idle"]);
+    });
+
+    it("leaves idle, live and waiting sources alone", async () => {
+      const rec = recordingOpener();
+      const { mgr, statuses } = setup(rec.opener);
+      mgr.setSources([game]);
+      expect(statuses).toEqual([["g", "idle"]]);
+      await mgr.acquire("g");
+      const n = statuses.length;
+      mgr.setSources([game]);
+      expect(statuses.length).toBe(n);
+
+      const waiting = setup(async () => {
+        throw new CaptureError("waiting", "no sender yet");
+      });
+      await expect(waiting.mgr.acquire("g")).rejects.toThrow();
+      waiting.mgr.setSources([game]);
+      expect(waiting.statuses.at(-1)).toEqual(["g", "waiting"]);
+    });
+
+    it("does not reset a source that is opening again", async () => {
+      const { opener, pending } = manualOpener();
+      const { mgr, statuses } = setup(opener);
+      const a = mgr.acquire("g");
+      pending[0]!.reject(new CaptureError("unavailable", "gone"));
+      await expect(a).rejects.toThrow();
+      void mgr.acquire("g"); // opening, still reported unavailable
+      mgr.setSources([game]);
+      expect(statuses.at(-1)).toEqual(["g", "unavailable"]);
+    });
+
+    it("forgets the status of a removed source", async () => {
+      const { mgr, statuses } = setup(async () => {
+        throw new CaptureError("unavailable", "window not found");
+      });
+      await expect(mgr.acquire("g")).rejects.toThrow();
+      mgr.setSources([]);
+      mgr.setSources([game]);
+      expect(statuses.at(-1)).toEqual(["g", "idle"]);
+      expect(statuses.filter(([, s]) => s === "idle")).toHaveLength(2);
+    });
+  });
+
   describe("stale releases", () => {
     it("absorbs releases from sessions of a capture that already ended", async () => {
       const rec = recordingOpener();

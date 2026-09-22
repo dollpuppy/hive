@@ -63,14 +63,26 @@ export class CaptureManager {
   private sources = new Map<string, SourceConfig>();
   private readonly active = new Map<string, Active>();
   private readonly orphans = new Map<string, number>();
+  /** The last status reported per source. */
+  private readonly statuses = new Map<string, SourceStatus>();
 
   constructor(private readonly opts: CaptureManagerOptions) {}
 
+  /**
+   * Replace the source list. New sources report idle. A source that is unavailable
+   * and not open is reset to idle too, so re-sending the list (e.g. after the user
+   * re-picks the same window or device) lets the next subscriber try again.
+   * `waiting` is left alone: Spout discovery owns that transition.
+   */
   setSources(sources: SourceConfig[]): void {
     const prev = this.sources;
     this.sources = new Map(sources.map((s) => [s.id, s]));
+    for (const id of [...this.statuses.keys()]) {
+      if (!this.sources.has(id)) this.statuses.delete(id);
+    }
     for (const s of sources) {
-      if (!prev.has(s.id)) this.opts.onStatus(s.id, "idle");
+      if (!prev.has(s.id)) this.report(s.id, "idle");
+      else if (this.statuses.get(s.id) === "unavailable" && !this.active.has(s.id)) this.report(s.id, "idle");
     }
     for (const [id, entry] of [...this.active]) {
       const next = this.sources.get(id);
@@ -78,7 +90,7 @@ export class CaptureManager {
       // Removed, or reconfigured: stop now so the next subscriber opens the new config.
       this.teardown(id, entry);
       this.opts.onEnded(id);
-      if (next) this.opts.onStatus(id, "idle");
+      if (next) this.report(id, "idle");
     }
   }
 
@@ -113,19 +125,19 @@ export class CaptureManager {
             if (this.active.get(sourceId) === entry) this.active.delete(sourceId);
             stream.getTracks().forEach((t) => t.stop());
             capture.dispose?.();
-            this.opts.onStatus(sourceId, "unavailable");
+            this.report(sourceId, "unavailable");
             throw new CaptureError("unavailable", "capture ended as it opened");
           }
         }
         entry.resolved = capture;
-        this.opts.onStatus(sourceId, "live");
+        this.report(sourceId, "live");
         return stream;
       },
       (err: unknown) => {
         if (!entry.stopped) {
           entry.stopped = true;
           if (this.active.get(sourceId) === entry) this.active.delete(sourceId);
-          this.opts.onStatus(sourceId, err instanceof CaptureError ? err.status : "unavailable");
+          this.report(sourceId, err instanceof CaptureError ? err.status : "unavailable");
         }
         throw err;
       },
@@ -146,7 +158,12 @@ export class CaptureManager {
     entry.refs--;
     if (entry.refs > 0) return;
     this.teardown(sourceId, entry);
-    if (this.sources.has(sourceId)) this.opts.onStatus(sourceId, "idle");
+    if (this.sources.has(sourceId)) this.report(sourceId, "idle");
+  }
+
+  private report(sourceId: string, status: SourceStatus): void {
+    if (this.sources.has(sourceId)) this.statuses.set(sourceId, status);
+    this.opts.onStatus(sourceId, status);
   }
 
   private teardown(sourceId: string, entry: Active): void {
@@ -163,7 +180,7 @@ export class CaptureManager {
   private onTrackEnded(sourceId: string, entry: Active): void {
     if (this.active.get(sourceId) !== entry) return;
     this.teardown(sourceId, entry);
-    this.opts.onStatus(sourceId, "unavailable");
+    this.report(sourceId, "unavailable");
     this.opts.onEnded(sourceId);
   }
 }
