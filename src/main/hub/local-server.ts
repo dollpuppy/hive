@@ -55,17 +55,35 @@ export function bindSocket(ws: WebSocket, handler: ChannelHandler): void {
   ws.on("error", () => ws.terminate());
 }
 
-function refuse(socket: Duplex, status: 403 | 404): void {
-  socket.write(`HTTP/1.1 ${status} ${status === 403 ? "Forbidden" : "Not Found"}\r\nConnection: close\r\n\r\n`);
+const REFUSE_REASONS: Record<400 | 403 | 404, string> = {
+  400: "Bad Request",
+  403: "Forbidden",
+  404: "Not Found",
+};
+
+function refuse(socket: Duplex, status: 400 | 403 | 404): void {
+  socket.write(`HTTP/1.1 ${status} ${REFUSE_REASONS[status]}\r\nConnection: close\r\n\r\n`);
   socket.destroy();
 }
+
+/** Parse the request target against a fixed base. Some targets Node's HTTP parser accepts (e.g. `//[`) are not valid URLs. */
+function parseRequestUrl(req: IncomingMessage): URL | null {
+  try {
+    return new URL(req.url ?? "/", "http://localhost");
+  } catch {
+    return null;
+  }
+}
+
+/** Ports outside our control (busy, or excluded by the OS, e.g. Windows' reserved-port ranges) — try the next one. */
+const PORT_UNAVAILABLE_CODES = new Set(["EADDRINUSE", "EACCES", "EADDRNOTAVAIL"]);
 
 async function listenOnFirstFree(server: http.Server, ports: number[]): Promise<number> {
   for (const port of ports) {
     const ok = await new Promise<boolean>((resolve, reject) => {
       const onError = (err: NodeJS.ErrnoException): void => {
         server.off("listening", onListening);
-        if (err.code === "EADDRINUSE") resolve(false);
+        if (err.code !== undefined && PORT_UNAVAILABLE_CODES.has(err.code)) resolve(false);
         else reject(err);
       };
       const onListening = (): void => {
@@ -90,14 +108,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<LocalS
     (opts.extraOrigins ?? []).includes(origin);
 
   const server = http.createServer((req, res) => {
+    const url = parseRequestUrl(req);
+    if (url === null) {
+      res.writeHead(400).end();
+      return;
+    }
     const viaTunnel = isViaTunnel(req);
-    const path = new URL(req.url ?? "/", "http://localhost").pathname;
+    const path = url.pathname;
     if (viaTunnel && !TUNNEL_HTTP_PATHS.has(path)) {
       res.writeHead(404).end();
       return;
     }
-    for (const route of opts.httpRoutes ?? []) {
-      if (route(req, res, { viaTunnel, path, port })) return;
+    try {
+      for (const route of opts.httpRoutes ?? []) {
+        if (route(req, res, { viaTunnel, path, port })) return;
+      }
+    } catch {
+      if (res.headersSent) res.end();
+      else res.writeHead(500).end();
+      return;
     }
     res.writeHead(404).end();
   });
@@ -107,7 +136,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<LocalS
     wss.handleUpgrade(req, socket, head, (ws) => bindSocket(ws, attach(wsChannel(ws))));
 
   server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
+    const url = parseRequestUrl(req);
+    if (url === null) return refuse(socket, 400);
     if (url.pathname === "/hub") {
       accept(req, socket, head, (c) => opts.hub.attachIncomingPeer(c));
       return;

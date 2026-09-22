@@ -1,3 +1,4 @@
+import net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { Hub } from "../../../src/main/hub/hub";
@@ -22,6 +23,21 @@ function open(url: string, headers: Record<string, string> = {}): Promise<WebSoc
 
 function nextMessage(ws: WebSocket): Promise<Record<string, unknown>> {
   return new Promise((resolve) => ws.once("message", (d) => resolve(JSON.parse(d.toString()))));
+}
+
+/** Send a raw HTTP request over a plain TCP socket and return the full response text. */
+function rawRequest(port: number, raw: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ port, host: "127.0.0.1" }, () => {
+      socket.write(raw);
+    });
+    let data = "";
+    socket.on("data", (chunk) => {
+      data += chunk.toString();
+    });
+    socket.on("close", () => resolve(data));
+    socket.on("error", reject);
+  });
 }
 
 describe("local server", () => {
@@ -116,4 +132,44 @@ describe("local server", () => {
     expect((await fetch(`${base}/join`, { headers: tunnel })).status).toBe(200);
     expect((await fetch(`${base}/missing`)).status).toBe(404);
   });
+
+  it("responds 400 instead of crashing on a malformed request target", async () => {
+    server = await startLocalServer({ hub: hub(), publisherToken: "T", ports: [0] });
+    const response = await rawRequest(server.port, "GET //[ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    expect(response).toMatch(/^HTTP\/1\.1 400/);
+  });
+
+  it("refuses the socket with 400 instead of crashing on a malformed upgrade target", async () => {
+    server = await startLocalServer({ hub: hub(), publisherToken: "T", ports: [0] });
+    const response = await rawRequest(
+      server.port,
+      "GET //[ HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+    );
+    expect(response).toMatch(/^HTTP\/1\.1 400/);
+  });
+
+  it("responds 500 when a route throws, and keeps serving later requests", async () => {
+    server = await startLocalServer({
+      hub: hub(),
+      publisherToken: "T",
+      ports: [0],
+      httpRoutes: [
+        (_req, _res, ctx) => {
+          if (ctx.path === "/boom") throw new Error("boom");
+          return false;
+        },
+      ],
+    });
+    const base = `http://127.0.0.1:${server.port}`;
+    expect((await fetch(`${base}/boom`)).status).toBe(500);
+    expect((await fetch(`${base}/other`)).status).toBe(404);
+  });
+
+  it.skipIf(process.platform !== "win32")(
+    "treats a reserved/excluded port as busy and tries the next one",
+    async () => {
+      server = await startLocalServer({ hub: hub(), publisherToken: "T", ports: [5357, 0] });
+      expect(server.port).not.toBe(5357);
+    },
+  );
 });
