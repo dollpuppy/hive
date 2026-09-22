@@ -5,7 +5,7 @@
 
 ## 1. Purpose
 
-Two streamers doing a collab (e.g. Pokémon Soul Link) each need the other's gameplay, webcam, and VTuber model on their own stream layout, in real time. Hive is a Windows desktop app that both streamers run. Each streamer **publishes** their own sources and **receives** their partner's sources. Every received source gets its own stable `localhost` URL that the streamer adds to OBS as a Browser Source.
+Two streamers doing a collab (e.g. Pokémon Soul Link) each need the other's gameplay, webcam, and VTuber model on their own stream layout, in real time. Hive is a Windows desktop app that both streamers run. Each streamer **publishes** their own sources and **receives** their partner's sources. Every received source gets its own stable `localhost` URL that the streamer adds to OBS as a Browser Source, and can optionally also be output as a Spout2 sender.
 
 Setup goal: install Hive once, send your partner one link.
 
@@ -16,6 +16,7 @@ Setup goal: install Hive once, send your partner one link.
 - Exactly 2 participants per session. Data model is keyed by peer so groups can be added later without changing URLs or protocol shape.
 - Source types: window/screen capture, webcam, Spout2 sender, browser-source URL.
 - Alpha transparency for Spout2 sources only.
+- Optional per-received-source Spout2 output (in addition to the browser-source URL).
 - Video only.
 - Cloudflare quick tunnel (`*.trycloudflare.com`) for hosting.
 
@@ -29,7 +30,7 @@ Setup goal: install Hive once, send your partner one link.
 
 ## 3. Architecture
 
-Electron app. Chromium supplies WebRTC (with hardware H.264 encode), window capture, webcam access, and offscreen rendering. A native C++ Node addon supplies Spout2 receive. `cloudflared.exe` is bundled.
+Electron app (**Electron ≥ 40**, required by texture-bridge). Chromium supplies WebRTC (with hardware H.264 encode), window capture, webcam access, and offscreen rendering. Spout2 send and receive use [`@napolab/texture-bridge`](https://github.com/naporin0624/electron-texture-bridge) (`-renderer` package; MIT; napi-rs prebuilt `win32-x64-msvc` binary) — no custom native code. `cloudflared.exe` is bundled.
 
 ### 3.1 Units
 
@@ -37,8 +38,9 @@ Electron app. Chromium supplies WebRTC (with hardware H.264 encode), window capt
 |---|---|---|
 | **Hub** (main process) | HTTP + WebSocket server on `127.0.0.1:7420`; session state; signaling router; config persistence | Dashboard, Publisher, viewer pages (local WS); partner Hub (via tunnel WS) |
 | **Tunnel manager** (main process) | Spawns/stops `cloudflared`, parses the public URL from its output, restarts on failure | Hub |
-| **Publisher** (hidden BrowserWindow, `nodeIntegration` on, trusted local content only) | Owns local source MediaStreams; creates one `RTCPeerConnection` per remote subscriber; applies encoding params | Hub (signaling), Spout addon (frames) |
-| **Spout addon** (native, loaded in Publisher) | Lists Spout senders; receives frames as BGRA buffers | Publisher |
+| **Publisher** (hidden BrowserWindow, trusted local content only) | Owns local source MediaStreams; creates one `RTCPeerConnection` per remote subscriber; applies encoding params | Hub (signaling), Spout input (frames) |
+| **Spout input** (main process + Publisher) | `SenderDiscovery` lists Spout senders with added/removed events; `createSharedTextureReceiver` delivers each frame zero-copy into the Publisher as a GPU-backed `VideoFrame` | Hub (sender list), Publisher |
+| **Spout output** (main process) | For received sources with Spout output enabled: `createTextureBridge` renders the local viewer page offscreen and publishes it as a Spout sender with alpha | Hub |
 | **Browser-source renderer** (offscreen BrowserWindow per URL source) | Renders a URL at a fixed size; emits frames | Publisher |
 | **Dashboard** (BrowserWindow) | UI only; all actions go through Hub API | Hub |
 | **Viewer page** (`/s/<peer>/<source>`, loaded by OBS) | Receives one source over WebRTC; unpacks alpha; renders full-canvas | Hub (local WS signaling) |
@@ -121,7 +123,7 @@ Approved mockup: `.superpowers/brainstorm/384-1790033008/content/dashboard-layou
 
 **Tabs**
 - One tab per connected partner (name + green dot), plus **My sources (n)**.
-- Partner tab: one row per source — 96×54 live preview thumbnail, name, status tag, resolution/fps, alpha tag if applicable, recommended OBS size, **Copy URL**.
+- Partner tab: one row per source — 96×54 live preview thumbnail, name, status tag, resolution/fps, alpha tag if applicable, recommended OBS size, **Copy URL**, and a **Spout out** toggle (off by default). When on, the row shows the Spout sender name to pick in OBS's Spout2 source.
 - My sources tab: one row per source — preview, name, device/window/sender tag, preset, viewer count, **Edit**. Final row: **+ Add source**.
 - When no partner connected: empty-state note "No partners yet — start the server and send your invite link, or paste theirs."
 
@@ -149,12 +151,12 @@ Inline hints:
 |---|---|
 | Window/Screen | Electron `desktopCapturer` source id → `getUserMedia({ video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId }}})` with frame-rate/size constraints from preset |
 | Webcam | `getUserMedia({ video: { deviceId, width, height, frameRate }})` |
-| Spout2 | Native addon receives BGRA frames → `VideoFrame` → alpha packing (6.2) → `MediaStreamTrackGenerator` |
+| Spout2 | texture-bridge `createSharedTextureReceiver({ senderName, target: publisherWindow })` → GPU-backed `VideoFrame` in Publisher (no CPU readback) → alpha packing (6.2) → `MediaStreamTrackGenerator`. Each `VideoFrame` is `close()`d after drawing. Sender picker is fed by `SenderDiscovery`. |
 | Browser URL | Offscreen BrowserWindow (`offscreen: true`) at configured size; `paint` event bitmap → `VideoFrame` → `MediaStreamTrackGenerator` (opaque) |
 
 ### 6.2 Alpha packing (Spout2 only)
 
-- **Sender:** WebGL on an `OffscreenCanvas` of size `2W × H`. Left half = RGB of the frame. Right half = alpha replicated into RGB as greyscale. Output feeds the track.
+- **Sender:** WebGL on an `OffscreenCanvas` of size `2W × H`; the incoming `VideoFrame` is uploaded with `texImage2D` (GPU-to-GPU). Left half = RGB of the frame. Right half = alpha replicated into RGB as greyscale. Output feeds the track.
 - **Receiver (viewer page):** WebGL shader samples RGB from `u ∈ [0, 0.5)` and alpha from the red channel at `u + 0.5`; draws to a transparent canvas sized `W × H`.
 - Bitrate for alpha sources = preset bitrate × 1.6.
 - `sources` message reports logical `width`/`height` (W × H), not packed size.
@@ -174,6 +176,18 @@ Defaults: game/window = Med, webcam = Low, Spout2 = Low, browser URL = Low.
 - `degradationPreference`: `maintain-resolution` for window/screen and URL; `balanced` for webcam and Spout2.
 - Each subscriber gets its own `RTCPeerConnection` and its own encode.
 - "Upload struggling" = outbound `qualityLimitationReason === 'bandwidth'` for > 5 s on any sender, read from `getStats()` every 2 s.
+
+### 6.4 Spout output for received sources
+
+Optional alternative to the browser-source URL, per received source.
+
+- Toggle **Spout out** on a partner source row → main process calls `createTextureBridge({ name, width, height, frameRate, rendererUrl: <local viewer page URL>, includeAlpha: true, pixelExact: true })`.
+- The offscreen window loads the same viewer page OBS would load, so it subscribes over WebRTC, unpacks alpha, and renders; texture-bridge publishes the result as a Spout sender. No re-encode: the video is decoded once, as in OBS.
+- Sender name: `Hive - <partner name> - <source name>` (stable across sessions, same rule as URLs).
+- In OBS, the streamer adds a Spout2 source (requires the Off World Live **obs-spout2-plugin**) and picks the sender.
+- Size/frame rate come from the source's logical W × H and fps; resized if the partner changes preset.
+- Toggle off, partner disconnect with no reconnect, or Kick → `bridge.dispose()`.
+- Toggle state is persisted per partner/source name.
 
 ## 7. Viewer pages & URLs
 
@@ -196,7 +210,7 @@ Defaults: game/window = Med, webcam = Low, Spout2 = Low, browser URL = Low.
 ## 9. Persistence
 
 `%APPDATA%/Hive/config.json`:
-- `version`, `displayName`, `sources[]` (type, device/window/sender/URL reference, name, slug, preset, size for URL sources), `turn` (url, username, credential), `keepSecret`, `secret` (only if keepSecret), window bounds.
+- `version`, `displayName`, `sources[]` (type, device/window/sender/URL reference, name, slug, preset, size for URL sources), `turn` (url, username, credential), `keepSecret`, `secret` (only if keepSecret), `spoutOut` (list of `{ partnerSlug, sourceSlug }` with Spout output enabled), window bounds.
 - On launch, sources restore in `idle`. Window sources whose window no longer exists → `unavailable`.
 - Config has a `version` field; loader migrates older versions.
 
@@ -207,7 +221,8 @@ Defaults: game/window = Med, webcam = Low, Spout2 = Low, browser URL = Low.
 | `cloudflared` fails to start or tunnel drops | Auto-restart up to 3 times with backoff. If the URL changes, banner: "Invite link changed — resend it." Existing P2P video continues (only signaling used the tunnel). After 3 failures: error state with Retry. |
 | Partner Hub disconnects | Partner tab greys out with "reconnecting…". Joiner side retries the same link for 60 s. Viewer pages draw nothing and resume automatically. |
 | P2P connection fails (ICE `failed`, or not `connected` within 10 s) | Banner: "Direct connection failed — add a TURN server in Settings", with help link. |
-| Spout sender disappears | Source `waiting`; addon polls sender list every 1 s; resumes when sender returns. |
+| Spout sender disappears | `SenderDiscovery` `removed` event → source `waiting`; receiver disposed. `added` event for the same name → receiver recreated, source resumes. |
+| Spout output fails to start | Row toggle reverts to off with an inline error; browser-source URL still works. |
 | Window closed / webcam unplugged | Source `unavailable` (amber); user must Edit to re-pick. |
 | Port 7420 busy | Try 7421–7429. Banner warns that OBS URLs use the new port. Fail with a clear error if none free. |
 | Upload saturated | "Upload struggling" badge with suggestion to lower a preset. |
@@ -218,12 +233,13 @@ Defaults: game/window = Med, webcam = Low, Spout2 = Low, browser URL = Low.
 - **Unit (Vitest):** signaling message validation, slug + collision logic, config load/migrate, invite link parse/validate, preset → encoding params, tunnel URL parsing from `cloudflared` output.
 - **Integration:** two Hive Hubs in one test process on different ports, joined over direct `ws://127.0.0.1` (no tunnel). Verify handshake, source-list exchange, subscribe/signal routing, kick, reconnect. Playwright loads a viewer page and asserts decoded frames arrive (fake source = canvas test pattern).
 - **Alpha golden test:** known RGBA pattern → pack → encode → decode → unpack; assert alpha per region within tolerance.
-- **Native addon smoke test:** receive from Spout's demo sender; assert frame size and non-zero alpha.
-- **Manual checklist:** two real PCs over the tunnel; OBS browser sources for all four types; VSeeFace with transparency; tunnel restart; partner disconnect/reconnect; strict-NAT failure message.
+- **Spout round-trip smoke test:** in one Electron test process, `createTextureBridge` sends a known RGBA pattern (with transparent regions) as a Spout sender; `createSharedTextureReceiver` receives it; assert frame size and that alpha survives. Covers both directions of texture-bridge.
+- **Manual checklist:** two real PCs over the tunnel; OBS browser sources for all four types; VSeeFace with transparency; Spout out into OBS's Spout2 source with transparency; tunnel restart; partner disconnect/reconnect; strict-NAT failure message.
 
 ## 12. Open risks
 
 - `MediaStreamTrackGenerator` availability in the shipped Electron/Chromium version — verify at project setup; fallback is `canvas.captureStream()`.
-- GPU→CPU readback cost of Spout frames at 1080p60 — target is 720p30 for VTuber sources; measure early.
+- **Alpha on Spout receive:** texture-bridge documents alpha explicitly only for sending. Frames arrive as `bgra`/`rgba`, so alpha should survive, but verify with VSeeFace in the first spike. Fallback: the RGBA-readback receiver (`createTextureReceiver`).
+- **texture-bridge maturity:** pre-1.0 (v0.15.0), low adoption (~170 downloads/month), single maintainer. Pin the exact version. MIT licence allows forking if it stalls.
 - OBS browser source (CEF) must support WebRTC H.264 decode; verify on current OBS. VP8 fallback covers it if not.
 - Cloudflare quick tunnels are best-effort with no uptime guarantee; acceptable for v1.
