@@ -12,15 +12,31 @@ const here = dirname(fileURLToPath(import.meta.url));
 const NAME = "Hive-Roundtrip-Test";
 const SIZE = 256;
 
-function finish(code, message) {
-  console[code === 0 ? "log" : "error"](message);
-  app.exit(code);
-}
-
 app.whenReady().then(async () => {
+  let bridge;
+  let receiver;
+  let bridgeDisposed = false;
+  let receiverDisposed = false;
+
+  function disposeAll() {
+    if (receiver && !receiverDisposed) {
+      receiverDisposed = true;
+      receiver.dispose();
+    }
+    if (bridge && !bridgeDisposed) {
+      bridgeDisposed = true;
+      bridge.dispose();
+    }
+  }
+
+  function finish(code, message) {
+    console[code === 0 ? "log" : "error"](message);
+    disposeAll();
+    app.exit(code);
+  }
+
   const timeout = setTimeout(() => finish(1, "FAIL: timed out after 20s"), 20_000);
 
-  let bridge;
   try {
     bridge = await createTextureBridge({
       name: NAME,
@@ -46,7 +62,6 @@ app.whenReady().then(async () => {
   });
   discovery.dispose();
 
-  let receiver;
   try {
     receiver = createTextureReceiver({ senderName: NAME });
   } catch (err) {
@@ -69,8 +84,6 @@ app.whenReady().then(async () => {
     console.log(`frame ${frame.width}x${frame.height} left=${JSON.stringify(left)} right=${JSON.stringify(right)}`);
     if (left.r < 200 || left.a < 200) return; // not painted yet
     clearTimeout(timeout);
-    receiver.dispose();
-    bridge.dispose();
     if (right.a > 30) finish(1, `FAIL: alpha lost on receive (right-half alpha=${right.a})`);
     else finish(0, "PASS: alpha survives Spout send -> receive");
   });
