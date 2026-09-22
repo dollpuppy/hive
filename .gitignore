@@ -5,3 +5,4 @@ out/
 coverage/
 *.log
 .serena/
+tests/e2e/.harness-dist/
