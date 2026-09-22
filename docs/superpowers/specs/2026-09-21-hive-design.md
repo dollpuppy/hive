@@ -243,3 +243,16 @@ Optional alternative to the browser-source URL, per received source.
 - **texture-bridge maturity:** pre-1.0 (v0.15.0), low adoption (~170 downloads/month), single maintainer. Pin the exact version. MIT licence allows forking if it stalls.
 - OBS browser source (CEF) must support WebRTC H.264 decode; verify on current OBS. VP8 fallback covers it if not.
 - Cloudflare quick tunnels are best-effort with no uptime guarantee; acceptable for v1.
+
+## 13. Implementation notes (from plans)
+
+- Degradation preference is expressed with `MediaStreamTrack.contentHint` (`"detail"` for window/url, `""` for webcam/spout) instead of `RTCRtpSendParameters.degradationPreference`.
+- Encoding limits are set via `addTransceiver(..., { sendEncodings })`; codec order via `setCodecPreferences` (H.264, VP8, rest).
+- Local message families: viewer (`watch`, `signal`, `ice-failed` ⇄ `watching`, `unavailable`, `ended`, `signal`) and publisher (`subscribe`, `unsubscribe`, `signal` ⇄ `signal`, `unsubscribe`, `source-status`, `health`). ICE servers travel in `watching` and publisher `subscribe`.
+- The viewer sends `ice-failed` only when a session never reached `connected` (ICE failure or 10 s connect timeout); a session that connected and later dropped just retries.
+- A newer Publisher connection replaces the old one, which is closed with code `4001` (`PUBLISHER_REPLACED_CLOSE_CODE`, `src/shared/close-codes.ts`); a client closed with 4001 halts instead of reconnecting.
+- Viewer URL peer segment `me` is reserved for previews of your own sources; partners never get that slug.
+- `/local/publisher` is protected by a per-launch token; `/local/viewer` by an Origin allowlist (own origin, `file://`, dev server). Chromium sends `Origin: file://` on WebSocket handshakes from `file:` pages.
+- Window capture: each open (select-window IPC + `getDisplayMedia()`) is serialized and times out after 10 s. Main grants display-media only to the Publisher's top-level frame, for a one-shot window selection that expires after 10 s.
+- Source status `idle` means ready (capture starts on first subscriber); `live` means capturing.
+- Planned (Plan 3): publisher frames from Spout/URL sources will be drawn to canvases and published with `canvas.captureStream()` rather than `MediaStreamTrackGenerator`.

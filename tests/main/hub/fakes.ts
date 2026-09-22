@@ -10,11 +10,13 @@ export const flush = async (): Promise<void> => {
 export class FakeChannel implements Channel {
   sent: Record<string, unknown>[] = [];
   closed = false;
+  closeCode: number | undefined;
   send(message: object): void {
     this.sent.push(JSON.parse(JSON.stringify(message)) as Record<string, unknown>);
   }
-  close(): void {
+  close(code?: number): void {
     this.closed = true;
+    this.closeCode = code;
   }
   ofType(type: string): Record<string, unknown>[] {
     return this.sent.filter((m) => m.type === type);

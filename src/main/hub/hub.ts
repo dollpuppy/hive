@@ -7,6 +7,7 @@ import {
   publisherInboundSchema,
   viewerInboundSchema,
   PROTOCOL_VERSION,
+  PUBLISHER_REPLACED_CLOSE_CODE,
   type IceServer,
   type PeerMessage,
   type PublisherOutbound,
@@ -422,9 +423,10 @@ export class Hub extends EventEmitter {
       for (const [subId, sub] of [...this.subs]) {
         if (sub.target === "publisher") this.endSub(subId, "publisher");
       }
-      old.close(1000, "replaced");
+      old.close(PUBLISHER_REPLACED_CLOSE_CODE, "replaced");
     }
     this.publisher = channel;
+    this.emit("publisher", true);
     return {
       onMessage: (raw) => {
         if (this.publisher !== channel) return;
@@ -452,8 +454,14 @@ export class Hub extends EventEmitter {
       onClose: () => {
         if (this.publisher !== channel) return;
         this.publisher = null;
+        this.emit("publisher", false);
         for (const [subId, sub] of [...this.subs]) {
           if (sub.target === "publisher") this.endSub(subId, "publisher");
+        }
+        // Nothing can be captured until the Publisher is back; it re-sends its real
+        // statuses when it reconnects. (A replaced Publisher skips this: the new one reports.)
+        if (this.localSources.some((s) => s.status !== "unavailable")) {
+          this.setLocalSources(this.localSources.map((s) => ({ ...s, status: "unavailable" as const })));
         }
       },
     };

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Hub } from "../../../src/main/hub/hub";
-import { PROTOCOL_VERSION } from "../../../src/shared/protocol";
+import { PROTOCOL_VERSION, PUBLISHER_REPLACED_CLOSE_CODE } from "../../../src/shared/protocol";
 import { FakeChannel, connectHubs, flush, source } from "./fakes";
 
 const makeHost = (secret: string | null = "S") =>
@@ -26,6 +26,17 @@ describe("Hub hardening", () => {
       expect(pub1.closed).toBe(true);
     });
 
+    it("closes the replaced publisher with the dedicated close code", () => {
+      const host = makeHost();
+      const pub1 = new FakeChannel();
+      host.attachPublisher(pub1);
+      host.attachPublisher(new FakeChannel());
+
+      expect(pub1.closed).toBe(true);
+      expect(pub1.closeCode).toBe(PUBLISHER_REPLACED_CLOSE_CODE);
+      expect(PUBLISHER_REPLACED_CLOSE_CODE).toBe(4001);
+    });
+
     it("ignores messages from a replaced publisher", () => {
       const host = makeHost();
       host.setLocalSources([source()]);
@@ -37,6 +48,32 @@ describe("Hub hardening", () => {
       handler1.onMessage(JSON.stringify({ type: "source-status", sourceId: "src-game", status: "live" }));
 
       expect(host.sources[0]?.status).toBe("idle");
+    });
+  });
+
+  describe("publisher event", () => {
+    it("emits true on attach and false when the publisher closes", () => {
+      const host = makeHost();
+      const events: boolean[] = [];
+      host.on("publisher", (connected: boolean) => events.push(connected));
+      const handler = host.attachPublisher(new FakeChannel());
+      expect(events).toEqual([true]);
+      handler.onClose();
+      expect(events).toEqual([true, false]);
+      expect(host.hasPublisher).toBe(false);
+    });
+
+    it("emits true (and no false) when a publisher is replaced, ignoring the old one's close", () => {
+      const host = makeHost();
+      const events: boolean[] = [];
+      host.on("publisher", (connected: boolean) => events.push(connected));
+      const handler1 = host.attachPublisher(new FakeChannel());
+      const handler2 = host.attachPublisher(new FakeChannel());
+      handler1.onClose();
+      expect(events).toEqual([true, true]);
+      expect(host.hasPublisher).toBe(true);
+      handler2.onClose();
+      expect(events).toEqual([true, true, false]);
     });
   });
 

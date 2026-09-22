@@ -82,10 +82,22 @@ describe("local server", () => {
     ws.close();
   });
 
-  it("accepts extra origins (dashboard)", async () => {
-    server = await startLocalServer({ hub: hub(), publisherToken: "T", ports: [0], extraOrigins: ["file://"] });
-    const ws = await open(`ws://127.0.0.1:${server.port}/local/viewer`, { Origin: "file://" });
+  it("accepts extra origins (dev server)", async () => {
+    server = await startLocalServer({
+      hub: hub(),
+      publisherToken: "T",
+      ports: [0],
+      extraOrigins: ["http://localhost:5173"],
+    });
+    const ws = await open(`ws://127.0.0.1:${server.port}/local/viewer`, { Origin: "http://localhost:5173" });
     ws.close();
+  });
+
+  it("rejects file:// viewers unless explicitly allowed", async () => {
+    server = await startLocalServer({ hub: hub(), publisherToken: "T", ports: [0] });
+    await expect(open(`ws://127.0.0.1:${server.port}/local/viewer`, { Origin: "file://" })).rejects.toThrow(
+      "HTTP 403",
+    );
   });
 
   it("rejects viewers from foreign origins", async () => {
