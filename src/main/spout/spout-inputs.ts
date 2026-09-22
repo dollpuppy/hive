@@ -7,9 +7,10 @@ import {
   createSharedTextureReceiver,
   type SharedTextureReceiverBridge,
 } from "@napolab/texture-bridge-renderer";
+import { OWN_OUTPUT_PREFIX } from "./spout-output-plan";
 
-/** Hive's own Spout outputs; hidden from the input picker to avoid feedback loops. */
-export const OWN_OUTPUT_PREFIX = "Hive - ";
+/** Re-exported for compatibility with existing importers. */
+export { OWN_OUTPUT_PREFIX };
 
 const DISCOVERY_INTERVAL_MS = 1000;
 const MAX_ID_CHARS = 256;
