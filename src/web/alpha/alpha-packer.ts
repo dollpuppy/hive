@@ -2,7 +2,7 @@ import { containRect } from "./contain-rect";
 import { QUAD_VS, bindFullscreenQuad, createProgram, createVideoTexture } from "./gl";
 
 const PACK_FS = `
-precision mediump float;
+precision highp float;
 varying vec2 v_uv;
 uniform sampler2D u_tex;
 uniform float u_mode;
@@ -14,14 +14,42 @@ void main() {
 /** Draws RGBA frames into a 2W×H opaque canvas: [RGB | A]. */
 export class AlphaPacker {
   readonly canvas: HTMLCanvasElement;
-  private readonly gl: WebGLRenderingContext;
-  private readonly uMode: WebGLUniformLocation;
+  private gl!: WebGLRenderingContext;
+  private uMode!: WebGLUniformLocation;
+  private readonly preserveDrawingBuffer: boolean;
+  private contextLost = false;
+  private disposed = false;
+  private readonly onContextLost = (e: Event): void => {
+    e.preventDefault();
+    this.contextLost = true;
+  };
+  private readonly onContextRestored = (): void => {
+    if (this.disposed) return;
+    this.contextLost = false;
+    this.init();
+  };
 
-  constructor(private readonly width: number, private readonly height: number) {
+  constructor(
+    private readonly width: number,
+    private readonly height: number,
+    opts: { preserveDrawingBuffer?: boolean } = {},
+  ) {
+    if (width % 2 !== 0) throw new Error("AlphaPacker width must be even");
+    this.preserveDrawingBuffer = opts.preserveDrawingBuffer ?? false;
     this.canvas = document.createElement("canvas");
     this.canvas.width = width * 2;
     this.canvas.height = height;
-    const gl = this.canvas.getContext("webgl", { alpha: false, antialias: false, preserveDrawingBuffer: true });
+    this.canvas.addEventListener("webglcontextlost", this.onContextLost);
+    this.canvas.addEventListener("webglcontextrestored", this.onContextRestored);
+    this.init();
+  }
+
+  private init(): void {
+    const gl = this.canvas.getContext("webgl", {
+      alpha: false,
+      antialias: false,
+      preserveDrawingBuffer: this.preserveDrawingBuffer,
+    });
     if (!gl) throw new Error("WebGL unavailable");
     this.gl = gl;
     const program = createProgram(gl, QUAD_VS, PACK_FS);
@@ -36,6 +64,7 @@ export class AlphaPacker {
 
   /** Must be called synchronously with a live frame (texture-bridge closes it after the handler). */
   draw(source: TexImageSource, sourceWidth: number, sourceHeight: number): void {
+    if (this.contextLost) return;
     const gl = this.gl;
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     const r = containRect(sourceWidth, sourceHeight, this.width, this.height);
@@ -50,6 +79,9 @@ export class AlphaPacker {
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.canvas.removeEventListener("webglcontextlost", this.onContextLost);
+    this.canvas.removeEventListener("webglcontextrestored", this.onContextRestored);
     this.gl.getExtension("WEBGL_lose_context")?.loseContext();
   }
 }
