@@ -23,6 +23,6 @@ export function sourceInfoFromConfig(cfg: SourceConfig, status: SourceStatus): S
 }
 
 export function iceServersFromTurn(turn: HiveConfig["turn"]): IceServer[] {
-  if (!turn || turn.url.trim() === "") return DEFAULT_ICE_SERVERS;
+  if (!turn || turn.url.trim() === "") return [...DEFAULT_ICE_SERVERS];
   return [...DEFAULT_ICE_SERVERS, { urls: turn.url.trim(), username: turn.username, credential: turn.credential }];
 }
