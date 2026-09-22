@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
@@ -102,9 +103,9 @@ async function renameWithRetry(from: string, to: string): Promise<void> {
   await rename(from, to);
 }
 
-export async function saveConfig(file: string, config: HiveConfig): Promise<void> {
+async function writeConfig(file: string, config: HiveConfig): Promise<void> {
   await mkdir(dirname(file), { recursive: true });
-  const tmp = `${file}.tmp`;
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(tmp, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   try {
     await renameWithRetry(tmp, file);
@@ -112,4 +113,25 @@ export async function saveConfig(file: string, config: HiveConfig): Promise<void
     await rm(tmp, { force: true });
     throw err;
   }
+}
+
+/**
+ * Per-file chain of settled (never-rejecting) save tasks, used only to serialize writes to the
+ * same path. A save's own outcome is reported through the promise `saveConfig` returns to its
+ * caller, not through this chain — so one failed save never blocks the next save from running.
+ */
+const saveChains = new Map<string, Promise<void>>();
+
+export function saveConfig(file: string, config: HiveConfig): Promise<void> {
+  const prior = saveChains.get(file) ?? Promise.resolve();
+  const result = prior.then(() => writeConfig(file, config));
+  const settled = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  saveChains.set(file, settled);
+  void settled.then(() => {
+    if (saveChains.get(file) === settled) saveChains.delete(file);
+  });
+  return result;
 }

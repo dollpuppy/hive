@@ -76,4 +76,14 @@ describe("config store", () => {
     await saveConfig(file, { ...defaultConfig(), displayName: "Locked" });
     expect(await loadConfig(file)).toEqual({ ...defaultConfig(), displayName: "Locked" });
   });
+
+  it("serializes concurrent saves instead of tearing the written file", async () => {
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) => saveConfig(file, { ...defaultConfig(), displayName: `n${i}` })),
+    );
+    expect(await loadConfig(file)).toEqual({ ...defaultConfig(), displayName: "n19" });
+    const files = await readdir(join(dir, "nested"));
+    expect(files.some((f) => f.includes(".corrupt-"))).toBe(false);
+    expect(files.some((f) => f.includes(".tmp"))).toBe(false);
+  });
 });
