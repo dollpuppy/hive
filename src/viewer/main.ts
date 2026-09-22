@@ -34,10 +34,13 @@ function startAlphaLoop(): void {
     }
   }
   const tick = (): void => {
-    if (video.readyState >= video.HAVE_CURRENT_DATA) {
-      unpacker?.draw(video, video.videoWidth, video.videoHeight);
+    try {
+      if (video.readyState >= video.HAVE_CURRENT_DATA) {
+        unpacker?.draw(video, video.videoWidth, video.videoHeight);
+      }
+    } finally {
+      raf = requestAnimationFrame(tick);
     }
-    raf = requestAnimationFrame(tick);
   };
   cancelAnimationFrame(raf);
   raf = requestAnimationFrame(tick);
