@@ -36,13 +36,16 @@ export interface HubOptions {
   getIceServers: () => IceServer[];
   heartbeatMs?: number;
   timeoutMs?: number;
+  handshakeTimeoutMs?: number;
 }
 
 interface PeerLink {
   channel: Channel;
   role: "host" | "joiner";
   established: boolean;
+  closed: boolean;
   lastSeen: number;
+  handshakeTimer: ReturnType<typeof setTimeout> | null;
 }
 
 /**
@@ -104,11 +107,32 @@ export class Hub extends EventEmitter {
   // ------------------------------------------------------------------- peer
 
   attachIncomingPeer(channel: Channel): ChannelHandler {
-    return this.peerHandler({ channel, role: "host", established: false, lastSeen: Date.now() });
+    const link: PeerLink = {
+      channel,
+      role: "host",
+      established: false,
+      closed: false,
+      lastSeen: Date.now(),
+      handshakeTimer: null,
+    };
+    const handshakeTimeoutMs = this.opts.handshakeTimeoutMs ?? 10_000;
+    link.handshakeTimer = setTimeout(() => {
+      if (link.established || link.closed) return;
+      link.closed = true;
+      link.channel.close(1008, "handshake timeout");
+    }, handshakeTimeoutMs);
+    return this.peerHandler(link);
   }
 
   attachOutgoingPeer(channel: Channel, secret: string): ChannelHandler {
-    const link: PeerLink = { channel, role: "joiner", established: false, lastSeen: Date.now() };
+    const link: PeerLink = {
+      channel,
+      role: "joiner",
+      established: false,
+      closed: false,
+      lastSeen: Date.now(),
+      handshakeTimer: null,
+    };
     channel.send({
       type: "hello",
       secret,
@@ -143,6 +167,7 @@ export class Hub extends EventEmitter {
   }
 
   private onPeerMessage(link: PeerLink, raw: string): void {
+    if (link.closed) return;
     const msg = parseMessage(peerMessageSchema, raw);
     if (!msg) return;
     link.lastSeen = Date.now();
@@ -158,9 +183,11 @@ export class Hub extends EventEmitter {
       case "subscribe":
         this.onPartnerSubscribe(msg.subId, msg.sourceId);
         break;
-      case "unsubscribe":
-        this.endSub(msg.subId, "partner");
+      case "unsubscribe": {
+        const sub = this.subs.get(msg.subId);
+        if (sub && (sub.target === "partner" || sub.viewer === null)) this.endSub(msg.subId, "partner");
         break;
+      }
       case "signal":
         this.onPartnerSignal(msg.subId, msg.payload);
         break;
@@ -180,6 +207,8 @@ export class Hub extends EventEmitter {
   private onHandshake(link: PeerLink, msg: PeerMessage): void {
     if (link.role === "host") {
       if (msg.type !== "hello") {
+        link.closed = true;
+        this.clearHandshakeTimer(link);
         link.channel.close(1008, "expected hello");
         return;
       }
@@ -197,12 +226,20 @@ export class Hub extends EventEmitter {
     }
     if (msg.type === "reject") {
       this.emit("rejected", msg.reason);
+      link.closed = true;
       link.channel.close(1000, "rejected");
       return;
     }
     if (msg.type !== "welcome") return;
+    if (this.peer && this.peer !== link) {
+      this.emit("rejected", "full" satisfies RejectReason);
+      link.closed = true;
+      link.channel.close(1000, "already partnered");
+      return;
+    }
     if (msg.protocolVersion !== PROTOCOL_VERSION) {
       this.emit("rejected", "version" satisfies RejectReason);
+      link.closed = true;
       link.channel.close(1000, "version");
       return;
     }
@@ -211,10 +248,13 @@ export class Hub extends EventEmitter {
 
   private reject(link: PeerLink, reason: RejectReason): void {
     link.channel.send({ type: "reject", reason });
+    link.closed = true;
+    this.clearHandshakeTimer(link);
     link.channel.close(1008, reason);
   }
 
   private establish(link: PeerLink, name: string): void {
+    this.clearHandshakeTimer(link);
     link.established = true;
     this.peer = link;
     this.partnerState = { name, slug: uniqueSlug(slugify(name), new Set([SELF_SLUG])), sources: [] };
@@ -223,7 +263,16 @@ export class Hub extends EventEmitter {
     this.emit("partner", this.partnerState);
   }
 
+  private clearHandshakeTimer(link: PeerLink): void {
+    if (link.handshakeTimer) {
+      clearTimeout(link.handshakeTimer);
+      link.handshakeTimer = null;
+    }
+  }
+
   private onPeerClose(link: PeerLink): void {
+    link.closed = true;
+    this.clearHandshakeTimer(link);
     if (this.peer !== link) return;
     this.peer = null;
     this.partnerState = null;
@@ -359,10 +408,17 @@ export class Hub extends EventEmitter {
   // -------------------------------------------------------------- publisher
 
   attachPublisher(channel: Channel): ChannelHandler {
-    if (this.publisher && this.publisher !== channel) this.publisher.close(1000, "replaced");
+    if (this.publisher && this.publisher !== channel) {
+      const old = this.publisher;
+      for (const [subId, sub] of [...this.subs]) {
+        if (sub.target === "publisher") this.endSub(subId, "publisher");
+      }
+      old.close(1000, "replaced");
+    }
     this.publisher = channel;
     return {
       onMessage: (raw) => {
+        if (this.publisher !== channel) return;
         const msg = parseMessage(publisherInboundSchema, raw);
         if (!msg) return;
         switch (msg.type) {
