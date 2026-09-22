@@ -25,6 +25,16 @@ function nextMessage(ws: WebSocket): Promise<Record<string, unknown>> {
   return new Promise((resolve) => ws.once("message", (d) => resolve(JSON.parse(d.toString()))));
 }
 
+/** Probe whether binding `port` on 127.0.0.1 fails with the given error code (e.g. a reserved/excluded port). */
+function probeBindErrorCode(port: number): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once("error", (err: NodeJS.ErrnoException) => resolve(err.code));
+    probe.once("listening", () => probe.close(() => resolve(undefined)));
+    probe.listen(port, "127.0.0.1");
+  });
+}
+
 /** Send a raw HTTP request over a plain TCP socket and return the full response text. */
 function rawRequest(port: number, raw: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -165,11 +175,10 @@ describe("local server", () => {
     expect((await fetch(`${base}/other`)).status).toBe(404);
   });
 
-  it.skipIf(process.platform !== "win32")(
-    "treats a reserved/excluded port as busy and tries the next one",
-    async () => {
-      server = await startLocalServer({ hub: hub(), publisherToken: "T", ports: [5357, 0] });
-      expect(server.port).not.toBe(5357);
-    },
-  );
+  it("treats a reserved/excluded port as busy and tries the next one", async (ctx) => {
+    const code = await probeBindErrorCode(5357);
+    ctx.skip(code !== "EACCES", "port 5357 does not yield EACCES on this machine");
+    server = await startLocalServer({ hub: hub(), publisherToken: "T", ports: [5357, 0] });
+    expect(server.port).not.toBe(5357);
+  });
 });

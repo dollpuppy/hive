@@ -79,12 +79,15 @@ function parseRequestUrl(req: IncomingMessage): URL | null {
 const PORT_UNAVAILABLE_CODES = new Set(["EADDRINUSE", "EACCES", "EADDRNOTAVAIL"]);
 
 async function listenOnFirstFree(server: http.Server, ports: number[]): Promise<number> {
+  let lastErr: NodeJS.ErrnoException | undefined;
   for (const port of ports) {
     const ok = await new Promise<boolean>((resolve, reject) => {
       const onError = (err: NodeJS.ErrnoException): void => {
         server.off("listening", onListening);
-        if (err.code !== undefined && PORT_UNAVAILABLE_CODES.has(err.code)) resolve(false);
-        else reject(err);
+        if (err.code !== undefined && PORT_UNAVAILABLE_CODES.has(err.code)) {
+          lastErr = err;
+          resolve(false);
+        } else reject(err);
       };
       const onListening = (): void => {
         server.off("error", onError);
@@ -96,7 +99,7 @@ async function listenOnFirstFree(server: http.Server, ports: number[]): Promise<
     });
     if (ok) return (server.address() as AddressInfo).port;
   }
-  throw new Error(`No free port in ${ports.join(", ")}`);
+  throw new Error(`No free port in ${ports.join(", ")}`, { cause: lastErr });
 }
 
 export async function startLocalServer(opts: LocalServerOptions): Promise<LocalServer> {
