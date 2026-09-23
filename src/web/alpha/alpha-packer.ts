@@ -27,8 +27,13 @@ export class AlphaPacker {
   };
   private readonly onContextRestored = (): void => {
     if (this.disposed) return;
-    this.contextLost = false;
-    this.init();
+    try {
+      this.init();
+      this.contextLost = false;
+    } catch (err) {
+      // Stay "lost" (draws are no-ops) rather than throw out of the event handler.
+      console.error("[hive] AlphaPacker: could not re-initialise the restored WebGL context", err);
+    }
   };
 
   constructor(

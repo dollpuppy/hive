@@ -42,6 +42,22 @@ const api: HivePublisherApi = {
 // forwards). Producers tag frames with extraArgs [sourceId].
 installSharedTextureReceiver();
 const sinks = new Map<string, FrameSink>();
+/** A throwing sink throws per frame: log at most this often per source. */
+const SINK_ERROR_LOG_INTERVAL_MS = 5000;
+const sinkErrorLog = new Map<string, { last: number; suppressed: number }>();
+function logSinkError(sourceId: string, err: unknown): void {
+  const now = Date.now();
+  const log = sinkErrorLog.get(sourceId) ?? { last: -Infinity, suppressed: 0 };
+  sinkErrorLog.set(sourceId, log);
+  if (now - log.last < SINK_ERROR_LOG_INTERVAL_MS) {
+    log.suppressed += 1;
+    return;
+  }
+  const note = log.suppressed > 0 ? ` (${log.suppressed} similar errors suppressed)` : "";
+  log.last = now;
+  log.suppressed = 0;
+  console.error(`[hive] frame sink threw${note}`, sourceId, err);
+}
 consumeSharedTexture({
   onFrame: (frame, ...args) => {
     const sourceId = args[0];
@@ -52,7 +68,7 @@ consumeSharedTexture({
     try {
       sink(frame.videoFrame);
     } catch (err) {
-      console.error("[hive] frame sink threw", sourceId, err);
+      logSinkError(sourceId, err);
     }
   },
   onError: (err) => console.error("[hive] shared texture receive error", err),
@@ -62,7 +78,9 @@ const frames: HiveFramesApi = {
   register: (sourceId, sink) => {
     sinks.set(sourceId, sink);
     return () => {
-      if (sinks.get(sourceId) === sink) sinks.delete(sourceId);
+      if (sinks.get(sourceId) !== sink) return;
+      sinks.delete(sourceId);
+      sinkErrorLog.delete(sourceId);
     };
   },
 };
