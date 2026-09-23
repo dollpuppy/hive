@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { BrowserWindow, session, type Session, type Streams, type WebContents } from "electron";
 import { forwardSharedTexture } from "@napolab/texture-bridge-core/electron";
 
@@ -69,12 +70,18 @@ interface UrlSource {
  * zero-copy to the Publisher, tagged with extraArgs [sourceId]. Each source gets
  * its own sandboxed window in an isolated session: the Publisher runs with
  * nodeIntegration and must never load remote content itself.
+ *
+ * Emits "failed" (sourceId, handle, reason) once when an open gives up retrying
+ * (more than 3 crashes/failed loads within 60 s); its window is then destroyed and
+ * the open forgotten, so a later close with that handle is a no-op.
  */
-export class UrlSources {
+export class UrlSources extends EventEmitter {
   private readonly sources = new Map<string, UrlSource>();
   private nextHandle = 1;
 
-  constructor(private readonly target: () => WebContents | null) {}
+  constructor(private readonly target: () => WebContents | null) {
+    super();
+  }
 
   /**
    * Opens (or replaces) the source's window. Throws on invalid input (including any
@@ -149,7 +156,7 @@ export class UrlSources {
     };
     // One retry pending at a time. Each failure within RETRY_WINDOW_MS doubles the
     // delay (1 s, 2 s, 4 s); a fourth failure within the window gives up.
-    const scheduleRetry = (retry: () => void): void => {
+    const scheduleRetry = (reason: string, retry: () => void): void => {
       if (!isCurrent() || entry.retryTimer) return;
       const now = Date.now();
       entry.failures = entry.failures.filter((t) => now - t < RETRY_WINDOW_MS);
@@ -157,6 +164,7 @@ export class UrlSources {
       const n = entry.failures.length;
       if (n > MAX_RETRIES_PER_WINDOW) {
         console.error(`[hive] url source ${sourceId}: ${n} failures within ${RETRY_WINDOW_MS / 1000} s, giving up`);
+        this.giveUp(sourceId, entry, `${n} failures within ${RETRY_WINDOW_MS / 1000} s (last: ${reason})`);
         return;
       }
       entry.retryTimer = setTimeout(() => {
@@ -168,11 +176,11 @@ export class UrlSources {
     wc.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       if (!isMainFrame || errorCode === ERR_ABORTED) return;
       console.warn(`[hive] url source ${sourceId} failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
-      scheduleRetry(load);
+      scheduleRetry(`${errorDescription} (${errorCode})`, load);
     });
     wc.on("render-process-gone", (_event, details) => {
       console.error(`[hive] url source ${sourceId} renderer gone: ${details.reason} (${details.exitCode})`);
-      scheduleRetry(() => wc.reload());
+      scheduleRetry(`renderer ${details.reason}`, () => wc.reload());
     });
 
     // A repeating invalidate() here (tried previously) does not, in practice, make
@@ -201,6 +209,21 @@ export class UrlSources {
     this.sources.delete(sourceId);
     if (entry.retryTimer) clearTimeout(entry.retryTimer);
     if (!entry.win.isDestroyed()) entry.win.destroy();
+  }
+
+  /**
+   * Forgets a source that stopped retrying and reports it "failed". The window is
+   * destroyed on the next tick, not inside the webContents event that got us here.
+   */
+  private giveUp(sourceId: string, entry: UrlSource, reason: string): void {
+    if (this.sources.get(sourceId) !== entry) return;
+    this.sources.delete(sourceId);
+    if (entry.retryTimer) clearTimeout(entry.retryTimer);
+    entry.retryTimer = null;
+    setTimeout(() => {
+      if (!entry.win.isDestroyed()) entry.win.destroy();
+    }, 0);
+    this.emit("failed", sourceId, entry.handle, reason);
   }
 
   droppedFrames(sourceId: string): number {

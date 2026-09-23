@@ -439,4 +439,54 @@ describe("UrlSources", () => {
     vi.advanceTimersByTime(2000);
     expect(wc.reloads).toBe(1);
   });
+
+  describe("giving up", () => {
+    const failLoad = (wc: FakeWebContents): void => {
+      wc.emit("did-fail-load", {}, -102, "ERR_CONNECTION_REFUSED", "http://127.0.0.1:9/", true, 0, 0);
+    };
+
+    it("emits failed once with the open's handle and destroys the window", () => {
+      vi.useFakeTimers();
+      const failed: unknown[][] = [];
+      sources.on("failed", (...args: unknown[]) => failed.push(args));
+      const handle = sources.open("s1", "http://127.0.0.1:9/", 100, 100, 30);
+      const wc = win(0).webContents;
+      for (let i = 0; i < 3; i++) {
+        failLoad(wc);
+        vi.advanceTimersByTime(4000);
+      }
+      expect(failed).toEqual([]);
+      failLoad(wc);
+      expect(failed).toEqual([["s1", handle, expect.stringContaining("ERR_CONNECTION_REFUSED")]]);
+      // Destroyed on the next tick, not inside the webContents event.
+      expect(win(0).destroyed).toBe(false);
+      vi.advanceTimersByTime(0);
+      expect(win(0).destroyed).toBe(true);
+      // Late events from the dead window do nothing more.
+      failLoad(wc);
+      wc.emit("render-process-gone", {}, { reason: "crashed", exitCode: 1 });
+      vi.advanceTimersByTime(60_000);
+      expect(failed).toHaveLength(1);
+      expect(wc.loaded).toHaveLength(4);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("forgets the open, so its close is a no-op and a re-open starts fresh", () => {
+      vi.useFakeTimers();
+      const failed: unknown[][] = [];
+      sources.on("failed", (...args: unknown[]) => failed.push(args));
+      const handle = sources.open("s1", "https://a.test", 100, 100, 30);
+      const wc = win(0).webContents;
+      for (let i = 0; i < 4; i++) {
+        wc.emit("render-process-gone", {}, { reason: "crashed", exitCode: 1 });
+        vi.advanceTimersByTime(4000);
+      }
+      expect(failed).toEqual([["s1", handle, expect.stringContaining("renderer crashed")]]);
+      const next = sources.open("s1", "https://a.test", 100, 100, 30);
+      sources.close("s1", handle);
+      expect(win(1).destroyed).toBe(false);
+      sources.close("s1", next);
+      expect(win(1).destroyed).toBe(true);
+    });
+  });
 });

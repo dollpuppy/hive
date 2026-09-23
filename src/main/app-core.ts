@@ -9,7 +9,7 @@ import { joinPartner, type JoinHandle } from "./hub/joiner";
 import { startLocalServer, type LocalServer } from "./hub/local-server";
 import { viewerRoute } from "./hub/static-files";
 import { generateSecret } from "./invite";
-import { registerPublisherIpc } from "./publisher-ipc";
+import { forwardPublisherEvents, registerPublisherIpc } from "./publisher-ipc";
 import { createPublisherWindow, rendererDevUrl } from "./publisher-window";
 import { SpoutInputs } from "./spout/spout-inputs";
 import { desiredOutputs } from "./spout/spout-output-plan";
@@ -99,10 +99,7 @@ export async function startAppCore(argv: string[]): Promise<AppCore> {
   const publisherTarget = () => (publisher.isDestroyed() ? null : publisherContents);
   const spoutInputs = new SpoutInputs(publisherTarget);
   const urlSources = new UrlSources(publisherTarget);
-  spoutInputs.on("availability", (name: string, available: boolean) => {
-    const target = publisherTarget();
-    if (target && !target.isDestroyed()) target.send("hive:publisher:spout-availability", name, available);
-  });
+  forwardPublisherEvents({ target: publisherTarget, spout: spoutInputs, url: urlSources });
   spoutInputs.start();
   // NOTE(Plan 4): `config` is reassigned (`let`); the closure reads the current value.
   // A single config store should replace this once the dashboard edits config.

@@ -135,10 +135,26 @@ export const openUrl: Opener = async (source: SourceConfig) => {
   // No frame rate: one frame per draw (already throttled), plus idle refreshes.
   const stream = canvas.captureStream();
   idle.start(stream);
+  // Main gives up after repeated crashes/failed loads and destroys the window; the
+  // canvas would otherwise keep re-sending its last (frozen) frame as "live".
+  let failed = false;
+  let onEnded: (() => void) | null = null;
+  const offFailed = window.hivePublisher.onUrlFailed((id, failedHandle) => {
+    if (id !== source.id || failedHandle !== handle || failed) return;
+    failed = true;
+    idle.stop();
+    console.warn(`[hive] URL source "${source.name}" failed; ending its capture`);
+    onEnded?.();
+  });
   return {
     stream,
+    onEnded: (listener) => {
+      onEnded = listener;
+      if (failed) listener();
+    },
     dispose: () => {
       idle.stop();
+      offFailed();
       unregister();
       window.hivePublisher.urlClose(source.id, handle).catch((err: unknown) => {
         console.error("[hive] urlClose failed", source.id, err);

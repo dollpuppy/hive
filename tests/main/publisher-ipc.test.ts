@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { IpcMainInvokeEvent } from "electron";
 import type { SourceConfig } from "../../src/main/config/config-store";
-import { registerPublisherIpc } from "../../src/main/publisher-ipc";
+import { EventEmitter } from "node:events";
+import { forwardPublisherEvents, registerPublisherIpc } from "../../src/main/publisher-ipc";
 
 vi.mock("electron", () => ({}));
 
@@ -136,5 +137,31 @@ describe("registerPublisherIpc", () => {
     expect(spout.close).not.toHaveBeenCalled();
     expect(url.open).not.toHaveBeenCalled();
     expect(url.close).not.toHaveBeenCalled();
+  });
+});
+
+describe("forwardPublisherEvents", () => {
+  it("forwards spout availability and url give-ups to the Publisher, skipping a missing or destroyed one", () => {
+    const spoutEvents = new EventEmitter();
+    const urlEvents = new EventEmitter();
+    const sent: unknown[][] = [];
+    let destroyed = false;
+    let present = true;
+    const wc = { isDestroyed: () => destroyed, send: (...args: unknown[]) => sent.push(args) };
+    forwardPublisherEvents({ target: () => (present ? wc : null), spout: spoutEvents, url: urlEvents });
+
+    spoutEvents.emit("availability", "Cam", false);
+    urlEvents.emit("failed", "u1", 4, "4 failures within 60 s");
+    expect(sent).toEqual([
+      ["hive:publisher:spout-availability", "Cam", false],
+      ["hive:publisher:url-failed", "u1", 4],
+    ]);
+
+    destroyed = true;
+    urlEvents.emit("failed", "u1", 5, "x");
+    destroyed = false;
+    present = false;
+    spoutEvents.emit("availability", "Cam", true);
+    expect(sent).toHaveLength(2);
   });
 });

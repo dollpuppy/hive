@@ -13,6 +13,13 @@ export class CaptureError extends Error {
 export interface Capture {
   stream: MediaStream;
   dispose?(): void;
+  /**
+   * Registers the manager's "this capture died" callback, for producers whose death
+   * the video track can't signal (stopping a track locally never fires its own
+   * `ended`). Treated exactly like the track ending. May call `listener` right away
+   * if the capture already died.
+   */
+  onEnded?(listener: () => void): void;
 }
 
 export type Opener = (source: SourceConfig) => Promise<Capture>;
@@ -118,16 +125,24 @@ export class CaptureManager {
         if (track) {
           track.contentHint = contentHintFor(source.kind);
           track.addEventListener("ended", () => this.onTrackEnded(sourceId, entry));
-          if (track.readyState === "ended") {
-            // Died before we could listen ("ended" never fires for it). Nobody holds this
-            // stream yet, so fail the open like an opener error: waiters reject, no release follows.
-            entry.stopped = true;
-            if (this.active.get(sourceId) === entry) this.active.delete(sourceId);
-            stream.getTracks().forEach((t) => t.stop());
-            capture.dispose?.();
-            this.report(sourceId, "unavailable");
-            throw new CaptureError("unavailable", "capture ended as it opened");
-          }
+        }
+        // A producer-side death reported while still registering counts as "ended as it opened".
+        let registering = true;
+        let endedEarly = false;
+        capture.onEnded?.(() => {
+          if (registering) endedEarly = true;
+          else this.onTrackEnded(sourceId, entry);
+        });
+        registering = false;
+        if (track?.readyState === "ended" || endedEarly) {
+          // Died before we could listen ("ended" never fires for it). Nobody holds this
+          // stream yet, so fail the open like an opener error: waiters reject, no release follows.
+          entry.stopped = true;
+          if (this.active.get(sourceId) === entry) this.active.delete(sourceId);
+          stream.getTracks().forEach((t) => t.stop());
+          capture.dispose?.();
+          this.report(sourceId, "unavailable");
+          throw new CaptureError("unavailable", "capture ended as it opened");
         }
         entry.resolved = capture;
         this.report(sourceId, "live");

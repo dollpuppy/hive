@@ -29,6 +29,13 @@ const api: HivePublisherApi = {
   },
   urlOpen: (sourceId) => ipcRenderer.invoke("hive:publisher:url-open", sourceId) as Promise<number>,
   urlClose: (sourceId, handle) => ipcRenderer.invoke("hive:publisher:url-close", sourceId, handle) as Promise<void>,
+  onUrlFailed: (listener) => {
+    const handler = (_e: IpcRendererEvent, sourceId: string, handle: number): void => listener(sourceId, handle);
+    ipcRenderer.on("hive:publisher:url-failed", handler);
+    return () => {
+      ipcRenderer.removeListener("hive:publisher:url-failed", handler);
+    };
+  },
 };
 
 // One receiving pool for every shared-texture producer (Spout receivers and URL

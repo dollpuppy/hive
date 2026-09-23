@@ -148,6 +148,47 @@ describe("CaptureManager", () => {
     expect(rec.made[1]!.track.stopped).toBe(true);
   });
 
+  it("a capture's onEnded hook ends it like a dying track", async () => {
+    const f = fakeStream();
+    let fire: (() => void) | undefined;
+    let disposed = 0;
+    const { mgr, statuses, ended } = setup(async () => ({
+      stream: f.stream,
+      dispose: () => disposed++,
+      onEnded: (l) => {
+        fire = l;
+      },
+    }));
+    await mgr.acquire("g");
+    expect(statuses.at(-1)).toEqual(["g", "live"]);
+    fire?.();
+    expect(statuses.at(-1)).toEqual(["g", "unavailable"]);
+    expect(ended).toEqual(["g"]);
+    expect(f.track.stopped).toBe(true);
+    expect(disposed).toBe(1);
+    // A second signal (or a late release) changes nothing.
+    fire?.();
+    mgr.release("g");
+    expect(ended).toEqual(["g"]);
+    expect(disposed).toBe(1);
+  });
+
+  it("fails the open when onEnded reports the capture already dead", async () => {
+    const f = fakeStream();
+    let disposed = 0;
+    const { mgr, statuses, ended } = setup(async () => ({
+      stream: f.stream,
+      dispose: () => disposed++,
+      onEnded: (l) => l(),
+    }));
+    await expect(mgr.acquire("g")).rejects.toThrow("capture ended");
+    expect(statuses.at(-1)).toEqual(["g", "unavailable"]);
+    expect(statuses.some(([, s]) => s === "live")).toBe(false);
+    expect(ended).toEqual([]);
+    expect(f.track.stopped).toBe(true);
+    expect(disposed).toBe(1);
+  });
+
   it("acquire after a track ended re-opens a fresh capture", async () => {
     const rec = recordingOpener();
     const { mgr } = setup(rec.opener);

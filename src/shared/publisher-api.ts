@@ -32,6 +32,11 @@ export interface HivePublisherApi {
   urlOpen(sourceId: string): Promise<number>;
   /** Stop the open identified by `handle`; a no-op if the source was re-opened since. */
   urlClose(sourceId: string, handle: number): Promise<void>;
+  /**
+   * Main gave up on the URL-source open `handle` (repeated crashes or failed loads)
+   * and destroyed its window. Returns a function that removes the listener.
+   */
+  onUrlFailed(listener: (sourceId: string, handle: number) => void): () => void;
 }
 
 /** Receives a GPU-backed VideoFrame. Use synchronously; never close it (the pool does). */

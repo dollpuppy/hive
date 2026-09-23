@@ -98,6 +98,7 @@ let spoutOpen: ReturnType<typeof vi.fn>;
 let spoutClose: ReturnType<typeof vi.fn>;
 let urlOpen: ReturnType<typeof vi.fn>;
 let urlClose: ReturnType<typeof vi.fn>;
+let urlFailedListeners: Set<(sourceId: string, handle: number) => void>;
 let nowValue: number;
 let lastCanvas: ReturnType<typeof fakeCanvas> | undefined;
 
@@ -115,6 +116,7 @@ beforeEach(async () => {
   spoutClose = vi.fn(async () => undefined);
   urlOpen = vi.fn(async () => 9);
   urlClose = vi.fn(async () => undefined);
+  urlFailedListeners = new Set();
   nowValue = 0;
   lastCanvas = undefined;
 
@@ -136,7 +138,16 @@ beforeEach(async () => {
         return off;
       }),
     },
-    hivePublisher: { spoutOpen, spoutClose, urlOpen, urlClose },
+    hivePublisher: {
+      spoutOpen,
+      spoutClose,
+      urlOpen,
+      urlClose,
+      onUrlFailed: (l: (sourceId: string, handle: number) => void) => {
+        urlFailedListeners.add(l);
+        return () => urlFailedListeners.delete(l);
+      },
+    },
   });
 
   vi.resetModules();
@@ -280,6 +291,69 @@ describe("openUrl", () => {
     nowValue = 5; // within the throttle gap: dropped
     sink?.(frame);
     expect(canvas?.ctx.drawImage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("openUrl give-up", () => {
+  const urlFailed = (sourceId: string, handle: number): void => {
+    for (const l of [...urlFailedListeners]) l(sourceId, handle);
+  };
+
+  it("ends the capture when main gives up on this open, and stops the idle refresher", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const capture = await gpuOpeners.openUrl(urlSource);
+    const ended = vi.fn();
+    capture.onEnded?.(ended);
+    urlFailed("other", 9);
+    urlFailed("u1", 8); // a superseded open
+    expect(ended).not.toHaveBeenCalled();
+    urlFailed("u1", 9);
+    expect(ended).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    urlFailed("u1", 9);
+    expect(ended).toHaveBeenCalledTimes(1);
+    capture.dispose?.();
+    expect(urlFailedListeners.size).toBe(0);
+  });
+
+  it("reports a give-up that arrived before onEnded was registered", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const capture = await gpuOpeners.openUrl(urlSource);
+    urlFailed("u1", 9);
+    const ended = vi.fn();
+    capture.onEnded?.(ended);
+    expect(ended).toHaveBeenCalledTimes(1);
+  });
+
+  it("through CaptureManager: reports unavailable and ends the sessions", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { CaptureManager } = await import("../../src/renderer/publisher/capture-manager");
+    const statuses: string[] = [];
+    const endedIds: string[] = [];
+    const mgr = new CaptureManager({
+      openers: { url: gpuOpeners.openUrl },
+      onStatus: (_id, s) => statuses.push(s),
+      onEnded: (id) => endedIds.push(id),
+    });
+    // A track closer to the real thing: stop() does not fire its own "ended".
+    const track = { readyState: "live", contentHint: "", requestFrame: vi.fn(), addEventListener: vi.fn(), stop: vi.fn() };
+    vi.stubGlobal("document", {
+      createElement: vi.fn(() => {
+        lastCanvas = fakeCanvas();
+        lastCanvas.captureStream.mockReturnValue({ getVideoTracks: () => [track], getTracks: () => [track] } as never);
+        return lastCanvas;
+      }),
+    });
+    mgr.setSources([urlSource]);
+    await mgr.acquire("u1");
+    expect(statuses.at(-1)).toBe("live");
+    urlFailed("u1", 9);
+    expect(statuses.at(-1)).toBe("unavailable");
+    expect(endedIds).toEqual(["u1"]);
+    expect(track.stop).toHaveBeenCalled();
+    expect(urlClose).toHaveBeenCalledWith("u1", 9);
+    expect(urlFailedListeners.size).toBe(0);
   });
 });
 

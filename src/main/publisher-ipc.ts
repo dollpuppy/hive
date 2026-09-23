@@ -86,3 +86,30 @@ export function registerPublisherIpc(deps: PublisherIpcDeps): void {
     deps.url.close(requireString(sourceId, "sourceId", MAX_ID_CHARS), requireHandle(handle));
   });
 }
+
+/** Where main pushes events to the Publisher (its webContents; a fake in tests). */
+export interface PublisherEventTarget {
+  isDestroyed(): boolean;
+  send(channel: string, ...args: unknown[]): void;
+}
+
+export interface PublisherEventDeps {
+  /** The Publisher's webContents, or null once its window is gone. */
+  target(): PublisherEventTarget | null;
+  spout: { on(event: "availability", listener: (senderName: string, available: boolean) => void): unknown };
+  url: { on(event: "failed", listener: (sourceId: string, handle: number, reason: string) => void): unknown };
+}
+
+/**
+ * Pushes Spout sender availability and URL-source give-ups to the Publisher, dropping
+ * them while its webContents is missing or destroyed. A give-up carries the open's
+ * handle so the Publisher only ends the capture that open belongs to.
+ */
+export function forwardPublisherEvents(deps: PublisherEventDeps): void {
+  const send = (channel: string, ...args: unknown[]): void => {
+    const target = deps.target();
+    if (target && !target.isDestroyed()) target.send(channel, ...args);
+  };
+  deps.spout.on("availability", (name, available) => send("hive:publisher:spout-availability", name, available));
+  deps.url.on("failed", (sourceId, handle) => send("hive:publisher:url-failed", sourceId, handle));
+}
