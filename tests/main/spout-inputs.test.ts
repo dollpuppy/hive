@@ -218,6 +218,29 @@ describe("SpoutInputs", () => {
     expect(receiver(0).disposed).toBe(false);
   });
 
+  it("tags a receiver construction failure as a missing sender", () => {
+    h.state.createThrows = new Error("no such sender");
+    expect(() => inputs.open("s1", "Gone")).toThrow(/^spout-sender-missing: "Gone" could not be received: no such sender$/);
+  });
+
+  it("once started, refuses senders Spout doesn't list, tagged as missing", () => {
+    h.state.listed = [{ name: "Cam" }];
+    inputs.start();
+    expect(() => inputs.open("s1", "Gone")).toThrow(/^spout-sender-missing: "Gone" is not listed$/);
+    expect(h.state.receivers).toHaveLength(0);
+    inputs.open("s1", "Cam");
+    discovery().emit("added", [{ name: "Late" }]);
+    inputs.open("s2", "Late");
+    expect(h.state.receivers).toHaveLength(2);
+  });
+
+  it("does not tag other open failures as missing", () => {
+    target = null;
+    expect(() => inputs.open("s1", "Cam")).toThrow(/^publisher not ready$/);
+    target = publisher;
+    expect(() => inputs.open("s1", "Hive - X")).not.toThrow(/spout-sender-missing/);
+  });
+
   it("a failed re-open leaves the source's previous receiver running", () => {
     inputs.open("s1", "Cam");
     h.state.createThrows = new Error("no such sender");
@@ -303,6 +326,7 @@ describe("SpoutInputs", () => {
   });
 
   it("dispose stops discovery and disposes every receiver", () => {
+    h.state.listed = [{ name: "Cam" }, { name: "Other" }];
     inputs.start();
     inputs.open("s1", "Cam");
     inputs.open("s2", "Other");

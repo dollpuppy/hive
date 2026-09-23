@@ -1,6 +1,14 @@
 import type { SourceConfig } from "../main/config/config-store";
 
 /**
+ * Prefix of the error message main throws when a Spout open fails because the sender
+ * isn't there (not listed, or its receiver couldn't be created). IPC rejections keep
+ * only the message, so the Publisher tells "wait for the sender" from other failures
+ * by this tag.
+ */
+export const SPOUT_SENDER_MISSING = "spout-sender-missing:";
+
+/**
  * Exposed by src/preload/publisher.ts on window.hivePublisher.
  *
  * Spout/URL opens resolve a handle that the matching close passes back: main
@@ -17,7 +25,8 @@ export interface HivePublisherApi {
   selectWindow(title: string): Promise<void>;
   /**
    * Start zero-copy delivery of a Spout sender, tagged with sourceId. Resolves the
-   * open's handle; rejects if the sender is missing.
+   * open's handle; rejects if the sender is missing (message contains
+   * SPOUT_SENDER_MISSING) or on any other failure.
    */
   spoutOpen(sourceId: string, senderName: string): Promise<number>;
   /** Stop the open identified by `handle`; a no-op if the source was re-opened since. */

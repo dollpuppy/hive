@@ -1,5 +1,6 @@
 import type { SourceConfig } from "../../main/config/config-store";
 import { PRESETS } from "../../shared/presets";
+import { SPOUT_SENDER_MISSING } from "../../shared/publisher-api";
 import { AlphaPacker } from "../../web/alpha/alpha-packer";
 import { containRect } from "../../web/alpha/contain-rect";
 import { CaptureError, type Opener } from "./capture-manager";
@@ -81,10 +82,15 @@ export const openSpout: Opener = async (source: SourceConfig) => {
   let handle: number;
   try {
     handle = await window.hivePublisher.spoutOpen(source.id, source.senderName);
-  } catch {
+  } catch (err) {
     unregister();
     packer.dispose();
-    throw new CaptureError("waiting", `Spout sender "${source.senderName}" not found`);
+    const reason = err instanceof Error ? err.message : String(err);
+    // A missing sender waits for availability; anything else is a real failure.
+    if (reason.includes(SPOUT_SENDER_MISSING)) {
+      throw new CaptureError("waiting", `Spout sender "${source.senderName}" not found`);
+    }
+    throw new CaptureError("unavailable", `Spout sender "${source.senderName}" could not be opened: ${reason}`);
   }
   // No frame rate: one frame per draw (already throttled), plus idle refreshes.
   const stream = packer.canvas.captureStream();

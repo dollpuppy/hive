@@ -165,12 +165,25 @@ describe("openSpout", () => {
     await expect(gpuOpeners.openSpout(camSource)).rejects.toThrow("not a spout source");
   });
 
-  it("maps a rejected spoutOpen to CaptureError waiting, unregisters, and disposes the packer", async () => {
-    spoutOpen.mockRejectedValueOnce(new Error("no sender"));
+  it("maps a missing-sender spoutOpen rejection to CaptureError waiting, unregisters, and disposes the packer", async () => {
+    // As it arrives over IPC: Electron prefixes the handler's message.
+    spoutOpen.mockRejectedValueOnce(
+      new Error("Error invoking remote method 'hive:publisher:spout-open': Error: spout-sender-missing: \"OBS\" is not listed"),
+    );
     const err = await gpuOpeners.openSpout(spoutSource).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CaptureError);
     expect(err).toMatchObject({ status: "waiting" });
     expect((err as CaptureErrorType).message).toContain('Spout sender "OBS" not found');
+    expect(unregisterFns.get("s1")).toHaveBeenCalledTimes(1);
+    expect(packerInstances[0]?.disposed).toBe(true);
+  });
+
+  it("maps any other spoutOpen rejection to CaptureError unavailable", async () => {
+    spoutOpen.mockRejectedValueOnce(new Error("Error invoking remote method 'hive:publisher:spout-open': Error: publisher not ready"));
+    const err = await gpuOpeners.openSpout(spoutSource).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CaptureError);
+    expect(err).toMatchObject({ status: "unavailable" });
+    expect((err as CaptureErrorType).message).toContain("publisher not ready");
     expect(unregisterFns.get("s1")).toHaveBeenCalledTimes(1);
     expect(packerInstances[0]?.disposed).toBe(true);
   });

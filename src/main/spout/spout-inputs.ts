@@ -7,6 +7,7 @@ import {
   createSharedTextureReceiver,
   type SharedTextureReceiverBridge,
 } from "@napolab/texture-bridge-renderer";
+import { SPOUT_SENDER_MISSING } from "../../shared/publisher-api";
 import { OWN_OUTPUT_PREFIX } from "./spout-output-plan";
 
 /** Re-exported for compatibility with existing importers. */
@@ -108,6 +109,8 @@ export class SpoutInputs extends EventEmitter {
    * receiver that source already had. Throws on invalid input, on Hive's own
    * outputs, when the Publisher is not ready, or when the sender does not exist;
    * on a throw the source's previous receiver (if any) is left untouched.
+   * A missing sender — not listed (once discovery runs), or its receiver could not
+   * be created — throws an error whose message starts with SPOUT_SENDER_MISSING.
    * Returns a handle identifying this open, for `close(sourceId, handle)`.
    */
   open(sourceId: string, senderName: string): number {
@@ -117,14 +120,20 @@ export class SpoutInputs extends EventEmitter {
     if (senderName.startsWith(OWN_OUTPUT_PREFIX)) throw new Error("cannot receive Hive's own output");
     const target = this.target();
     if (!target || target.isDestroyed()) throw new Error("publisher not ready");
-    // Construction is the only throwing step (e.g. no such sender); let it propagate.
+    // "added" reports the sender (and makes it known) when it appears.
+    if (this.started && !this.known.has(senderName)) {
+      throw new Error(`${SPOUT_SENDER_MISSING} "${senderName}" is not listed`);
+    }
+    // Construction is the only throwing step (e.g. no such sender).
     let receiver: SharedTextureReceiverBridge;
     try {
       receiver = createSharedTextureReceiver({ senderName, target, extraArgs: [sourceId] });
     } catch (err) {
       // Discovery still lists it, so no "added" will ever come; retry later ourselves.
+      // Either way the source should wait for the sender, so it's reported as missing.
       if (this.known.has(senderName)) this.scheduleNudge(senderName);
-      throw err;
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`${SPOUT_SENDER_MISSING} "${senderName}" could not be received: ${reason}`, { cause: err });
     }
     const entry: ReceiverEntry = { handle: this.nextHandle++, senderName, receiver };
     let lastErrorLog = -Infinity;
