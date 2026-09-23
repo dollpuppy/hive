@@ -408,27 +408,18 @@ describe("UrlSources", () => {
     expect(wc.loaded).toHaveLength(1);
   });
 
-  it("invalidates on load and every second while open", () => {
+  it("invalidates once after load, but not on a repeating timer", () => {
     vi.useFakeTimers();
     sources.open("s1", "https://a.test", 100, 100, 30);
     const wc = win(0).webContents;
     wc.emit("did-finish-load");
     expect(wc.invalidations).toBe(1);
-    vi.advanceTimersByTime(3000);
-    expect(wc.invalidations).toBe(4);
+    // A repeating invalidate() was tried and found not to produce new paints for an
+    // unchanged page (see the comment in url-sources.ts), so it was removed: keepalive
+    // now happens downstream in the Publisher instead.
+    vi.advanceTimersByTime(5000);
+    expect(wc.invalidations).toBe(1);
     sources.close("s1");
-    vi.advanceTimersByTime(3000);
-    expect(wc.invalidations).toBe(4);
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it("stops invalidating when the webContents is destroyed", () => {
-    vi.useFakeTimers();
-    sources.open("s1", "https://a.test", 100, 100, 30);
-    const wc = win(0).webContents;
-    wc.emit("destroyed");
-    vi.advanceTimersByTime(3000);
-    expect(wc.invalidations).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
   });
 

@@ -24,13 +24,16 @@ function canRequestFrame(track: MediaStreamTrack): track is CanvasCaptureMediaSt
 }
 
 /**
- * `captureStream()` only emits a frame when the canvas is drawn, so a paused Spout
- * sender or a static page would leave late joiners (and the encoder) with nothing.
- * While no draw has happened for about IDLE_REFRESH_MS, re-send the canvas's current
- * contents with `requestFrame()`. The canvas must preserve its drawing buffer (2D
- * canvases always do; WebGL needs `preserveDrawingBuffer`).
+ * `captureStream()` (called with no frame rate) only emits a frame when the canvas is
+ * actually painted to, so a paused Spout sender or a static page would leave late
+ * joiners (and the encoder) with nothing. While no draw has happened for about
+ * IDLE_REFRESH_MS, `redraw()` re-paints the canvas's own unchanged contents so the
+ * browser sees a dirty canvas and captures a frame from it on its own. `requestFrame()`
+ * is also called: per spec it should force a capture regardless, but in practice
+ * Chromium only honors it right after the canvas was actually modified, i.e. right
+ * after `redraw()` — so it's kept as a (likely redundant, essentially free) nudge.
  */
-function idleRefresher(): { drew(): void; start(stream: MediaStream): void; stop(): void } {
+function idleRefresher(redraw: () => void): { drew(): void; start(stream: MediaStream): void; stop(): void } {
   let lastDraw = -Infinity;
   let timer: ReturnType<typeof setInterval> | undefined;
   return {
@@ -39,9 +42,11 @@ function idleRefresher(): { drew(): void; start(stream: MediaStream): void; stop
     },
     start: (stream) => {
       const track = stream.getVideoTracks()[0];
-      if (!track || !canRequestFrame(track)) return;
+      if (!track) return;
       timer = setInterval(() => {
-        if (performance.now() - lastDraw >= IDLE_REFRESH_MS * 0.9) track.requestFrame();
+        if (performance.now() - lastDraw < IDLE_REFRESH_MS * 0.9) return;
+        redraw();
+        if (canRequestFrame(track)) track.requestFrame();
       }, IDLE_REFRESH_MS);
     },
     stop: () => clearInterval(timer),
@@ -67,7 +72,7 @@ export const openSpout: Opener = async (source: SourceConfig) => {
     throw new CaptureError("unavailable", `could not create alpha packer: ${err instanceof Error ? err.message : String(err)}`);
   }
   const due = throttle(spec.fps);
-  const idle = idleRefresher();
+  const idle = idleRefresher(() => packer.redraw());
   const unregister = window.hiveFrames.register(source.id, (frame) => {
     if (!due()) return;
     packer.draw(frame, frame.displayWidth, frame.displayHeight);
@@ -108,7 +113,9 @@ export const openUrl: Opener = async (source: SourceConfig) => {
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, source.width, source.height);
   const due = throttle(fps);
-  const idle = idleRefresher();
+  // Re-paints the canvas onto itself: same pixels, but a "dirty canvas" as far as
+  // captureStream() is concerned.
+  const idle = idleRefresher(() => ctx.drawImage(canvas, 0, 0));
   const unregister = window.hiveFrames.register(source.id, (frame) => {
     if (!due()) return;
     const r = containRect(frame.displayWidth, frame.displayHeight, source.width, source.height);

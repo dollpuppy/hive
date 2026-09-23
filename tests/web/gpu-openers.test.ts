@@ -21,6 +21,7 @@ interface FakePacker {
   opts: unknown;
   canvas: { captureStream: ReturnType<typeof vi.fn> };
   draws: Array<{ w: number; h: number }>;
+  redraws: number;
   disposed: boolean;
 }
 
@@ -33,6 +34,7 @@ vi.mock("../../src/web/alpha/alpha-packer", () => {
     height: number;
     canvas = { captureStream: vi.fn(() => fakeStream("packer-stream")) };
     draws: Array<{ w: number; h: number }> = [];
+    redraws = 0;
     disposed = false;
     constructor(width: number, height: number, readonly opts: unknown) {
       if (nextPackerThrows) {
@@ -46,6 +48,9 @@ vi.mock("../../src/web/alpha/alpha-packer", () => {
     }
     draw(_source: unknown, sw: number, sh: number): void {
       this.draws.push({ w: sw, h: sh });
+    }
+    redraw(): void {
+      this.redraws += 1;
     }
     dispose(): void {
       this.disposed = true;
@@ -284,20 +289,33 @@ describe("idle refresh", () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   };
 
+  // Per opener: how many times its "redraw the same content" step has run so far.
+  // openUrl's redraw is `ctx.drawImage(canvas, 0, 0)`, distinguished from a real frame
+  // draw (`ctx.drawImage(frame, ...)`) by its first argument being the canvas itself.
+  const redrawCount = {
+    openSpout: () => packerInstances[0]?.redraws ?? 0,
+    openUrl: () => {
+      const canvas = lastCanvas;
+      return canvas?.ctx.drawImage.mock.calls.filter((args: unknown[]) => args[0] === canvas).length ?? 0;
+    },
+  };
+
   for (const [name, open, source] of [
     ["openSpout", () => gpuOpeners.openSpout(spoutSource), spoutSource],
     ["openUrl", () => gpuOpeners.openUrl(urlSource), urlSource],
   ] as const) {
     describe(name, () => {
-      it("re-sends the last frame each second while nothing is drawn", async () => {
+      it("re-draws the unchanged canvas and re-sends the frame each second while nothing is drawn", async () => {
         useTimers();
         const capture = await open();
         const track = (capture.stream as unknown as FakeStream).track;
         vi.advanceTimersByTime(1000);
         expect(track.requestFrame).toHaveBeenCalledTimes(1);
+        expect(redrawCount[name]()).toBe(1);
         nowValue = 2000;
         vi.advanceTimersByTime(1000);
         expect(track.requestFrame).toHaveBeenCalledTimes(2);
+        expect(redrawCount[name]()).toBe(2);
       });
 
       it("does not re-send while frames are being drawn", async () => {
@@ -323,12 +341,27 @@ describe("idle refresh", () => {
     });
   }
 
-  it("skips tracks without requestFrame", async () => {
+  it("still re-draws (but skips requestFrame) on tracks without it", async () => {
     useTimers();
     vi.stubGlobal("document", {
       createElement: vi.fn(() => {
         lastCanvas = fakeCanvas();
         lastCanvas.captureStream.mockReturnValue({ kind: "no-request-frame", getVideoTracks: () => [{}] } as never);
+        return lastCanvas;
+      }),
+    });
+    await gpuOpeners.openUrl(urlSource);
+    vi.advanceTimersByTime(1000);
+    expect(lastCanvas?.ctx.drawImage).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("skips the timer entirely when the stream has no video track", async () => {
+    useTimers();
+    vi.stubGlobal("document", {
+      createElement: vi.fn(() => {
+        lastCanvas = fakeCanvas();
+        lastCanvas.captureStream.mockReturnValue({ kind: "no-track", getVideoTracks: () => [] } as never);
         return lastCanvas;
       }),
     });

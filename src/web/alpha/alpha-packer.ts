@@ -1,4 +1,4 @@
-import { containRect } from "./contain-rect";
+import { type Rect, containRect } from "./contain-rect";
 import { QUAD_VS, bindFullscreenQuad, createProgram, createVideoTexture } from "./gl";
 
 const PACK_FS = `
@@ -19,6 +19,8 @@ export class AlphaPacker {
   private readonly preserveDrawingBuffer: boolean;
   private contextLost = false;
   private disposed = false;
+  /** Rect from the last draw()'s containRect, so redraw() can re-run it without a fresh upload. */
+  private lastRect: Rect | null = null;
   private readonly onContextLost = (e: Event): void => {
     e.preventDefault();
     this.contextLost = true;
@@ -45,6 +47,8 @@ export class AlphaPacker {
   }
 
   private init(): void {
+    // A restored context has a fresh, empty texture, so any pending redraw() is stale.
+    this.lastRect = null;
     const gl = this.canvas.getContext("webgl", {
       alpha: false,
       antialias: false,
@@ -65,9 +69,26 @@ export class AlphaPacker {
   /** Must be called synchronously with a live frame (texture-bridge closes it after the handler). */
   draw(source: TexImageSource, sourceWidth: number, sourceHeight: number): void {
     if (this.contextLost) return;
-    const gl = this.gl;
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    this.gl.texImage2D(this.gl.TEXTURE_2D, 0, this.gl.RGBA, this.gl.RGBA, this.gl.UNSIGNED_BYTE, source);
     const r = containRect(sourceWidth, sourceHeight, this.width, this.height);
+    this.lastRect = r;
+    this.paint(r);
+  }
+
+  /**
+   * Re-runs the last draw() from the already-uploaded texture (it keeps its data after
+   * the source VideoFrame is closed) without re-uploading anything. Used by the idle
+   * keepalive to mark the canvas dirty with unchanged content so captureStream() emits
+   * a frame. No-op before the first draw(), or while the context is lost/was just
+   * restored (its texture is fresh and empty).
+   */
+  redraw(): void {
+    if (this.contextLost || !this.lastRect) return;
+    this.paint(this.lastRect);
+  }
+
+  private paint(r: Rect): void {
+    const gl = this.gl;
     gl.viewport(0, 0, this.width * 2, this.height);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.viewport(r.x, r.y, r.w, r.h);
