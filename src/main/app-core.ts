@@ -123,6 +123,11 @@ export async function startAppCore(argv: string[]): Promise<AppCore> {
   publisherContents.on("did-start-navigation", (details) => {
     if (details.isMainFrame && !details.isSameDocument) closePublisherFeeds();
   });
+  // Again once the navigation commits (did-navigate is main-frame, cross-document
+  // only): an open from the old page still in flight at did-start-navigation lands
+  // after it. The new page can't have opened anything yet: its opens follow a
+  // viewer's acquire over the WebSocket it connects after loading.
+  publisherContents.on("did-navigate", closePublisherFeeds);
   publisherContents.on("render-process-gone", closePublisherFeeds);
 
   // Spout outputs: one sender per enabled partner source, re-synced whenever the partner
