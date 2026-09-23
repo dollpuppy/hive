@@ -16,6 +16,38 @@ function throttle(fps: number): () => boolean {
   };
 }
 
+/** How long a canvas may go without a draw before its last frame is re-sent. */
+export const IDLE_REFRESH_MS = 1000;
+
+function canRequestFrame(track: MediaStreamTrack): track is CanvasCaptureMediaStreamTrack {
+  return typeof (track as Partial<CanvasCaptureMediaStreamTrack>).requestFrame === "function";
+}
+
+/**
+ * `captureStream()` only emits a frame when the canvas is drawn, so a paused Spout
+ * sender or a static page would leave late joiners (and the encoder) with nothing.
+ * While no draw has happened for about IDLE_REFRESH_MS, re-send the canvas's current
+ * contents with `requestFrame()`. The canvas must preserve its drawing buffer (2D
+ * canvases always do; WebGL needs `preserveDrawingBuffer`).
+ */
+function idleRefresher(): { drew(): void; start(stream: MediaStream): void; stop(): void } {
+  let lastDraw = -Infinity;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  return {
+    drew: () => {
+      lastDraw = performance.now();
+    },
+    start: (stream) => {
+      const track = stream.getVideoTracks()[0];
+      if (!track || !canRequestFrame(track)) return;
+      timer = setInterval(() => {
+        if (performance.now() - lastDraw >= IDLE_REFRESH_MS * 0.9) track.requestFrame();
+      }, IDLE_REFRESH_MS);
+    },
+    stop: () => clearInterval(timer),
+  };
+}
+
 /**
  * Spout capture: frames come from an external sender whose real size can differ from
  * (and change independently of) the source's configured preset. The preset's width/height
@@ -29,13 +61,17 @@ export const openSpout: Opener = async (source: SourceConfig) => {
   const spec = PRESETS[source.preset];
   let packer: AlphaPacker;
   try {
-    packer = new AlphaPacker(spec.width, spec.height);
+    // Preserved so requestFrame() re-sends the last packed frame, not a cleared buffer.
+    packer = new AlphaPacker(spec.width, spec.height, { preserveDrawingBuffer: true });
   } catch (err) {
     throw new CaptureError("unavailable", `could not create alpha packer: ${err instanceof Error ? err.message : String(err)}`);
   }
   const due = throttle(spec.fps);
+  const idle = idleRefresher();
   const unregister = window.hiveFrames.register(source.id, (frame) => {
-    if (due()) packer.draw(frame, frame.displayWidth, frame.displayHeight);
+    if (!due()) return;
+    packer.draw(frame, frame.displayWidth, frame.displayHeight);
+    idle.drew();
   });
   let handle: number;
   try {
@@ -45,9 +81,13 @@ export const openSpout: Opener = async (source: SourceConfig) => {
     packer.dispose();
     throw new CaptureError("waiting", `Spout sender "${source.senderName}" not found`);
   }
+  // No frame rate: one frame per draw (already throttled), plus idle refreshes.
+  const stream = packer.canvas.captureStream();
+  idle.start(stream);
   return {
-    stream: packer.canvas.captureStream(spec.fps),
+    stream,
     dispose: () => {
+      idle.stop();
       unregister();
       window.hivePublisher.spoutClose(source.id, handle).catch((err: unknown) => {
         console.error("[hive] spoutClose failed", source.id, err);
@@ -68,11 +108,13 @@ export const openUrl: Opener = async (source: SourceConfig) => {
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, source.width, source.height);
   const due = throttle(fps);
+  const idle = idleRefresher();
   const unregister = window.hiveFrames.register(source.id, (frame) => {
     if (!due()) return;
     const r = containRect(frame.displayWidth, frame.displayHeight, source.width, source.height);
     ctx.fillRect(0, 0, source.width, source.height);
     ctx.drawImage(frame, r.x, r.y, r.w, r.h);
+    idle.drew();
   });
   let handle: number;
   try {
@@ -81,9 +123,13 @@ export const openUrl: Opener = async (source: SourceConfig) => {
     unregister();
     throw new CaptureError("unavailable", `could not load ${source.url}`);
   }
+  // No frame rate: one frame per draw (already throttled), plus idle refreshes.
+  const stream = canvas.captureStream();
+  idle.start(stream);
   return {
-    stream: canvas.captureStream(fps),
+    stream,
     dispose: () => {
+      idle.stop();
       unregister();
       window.hivePublisher.urlClose(source.id, handle).catch((err: unknown) => {
         console.error("[hive] urlClose failed", source.id, err);

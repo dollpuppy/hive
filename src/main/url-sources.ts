@@ -12,6 +12,11 @@ const RETRY_WINDOW_MS = 60_000;
 const MAX_RETRIES_PER_WINDOW = 3;
 /** Chromium's ERR_ABORTED: a navigation superseded by another, not a failure. */
 const ERR_ABORTED = -3;
+/**
+ * Offscreen windows only paint on change, so a static page would send one frame
+ * and then nothing; invalidating this often keeps late joiners supplied.
+ */
+const INVALIDATE_INTERVAL_MS = 1000;
 const MAX_ID_CHARS = 256;
 const MAX_DIMENSION = 8192;
 const MAX_FPS = 240;
@@ -28,6 +33,11 @@ function isWebUrl(url: string): boolean {
 function requireSize(value: number, what: string, max: number): number {
   if (!Number.isInteger(value) || value < 1 || value > max) throw new Error(`invalid ${what}`);
   return value;
+}
+
+function stopInvalidating(entry: { invalidateTimer: ReturnType<typeof setInterval> | null }): void {
+  if (entry.invalidateTimer) clearInterval(entry.invalidateTimer);
+  entry.invalidateTimer = null;
 }
 
 let configuredSession: Session | null = null;
@@ -62,6 +72,7 @@ interface UrlSource {
   retryTimer: ReturnType<typeof setTimeout> | null;
   /** Times of recent crashes/failed loads, for the retry backoff and cap. */
   failures: number[];
+  invalidateTimer: ReturnType<typeof setInterval> | null;
 }
 
 /**
@@ -106,7 +117,7 @@ export class UrlSources {
         backgroundThrottling: false,
       },
     });
-    const entry: UrlSource = { handle: this.nextHandle++, win, drops: 0, retryTimer: null, failures: [] };
+    const entry: UrlSource = { handle: this.nextHandle++, win, drops: 0, retryTimer: null, failures: [], invalidateTimer: null };
     this.sources.set(sourceId, entry); // registered first so close() can always reach the window
     const wc = win.webContents;
     const isCurrent = (): boolean => this.sources.get(sourceId) === entry;
@@ -174,6 +185,13 @@ export class UrlSources {
       scheduleRetry(() => wc.reload());
     });
 
+    const invalidate = (): void => {
+      if (!win.isDestroyed()) wc.invalidate();
+    };
+    wc.on("did-finish-load", invalidate);
+    entry.invalidateTimer = setInterval(invalidate, INVALIDATE_INTERVAL_MS);
+    wc.once("destroyed", () => stopInvalidating(entry));
+
     wc.setFrameRate(fps);
     load();
     return entry.handle;
@@ -190,6 +208,7 @@ export class UrlSources {
     if (handle !== undefined && entry.handle !== handle) return;
     this.sources.delete(sourceId);
     if (entry.retryTimer) clearTimeout(entry.retryTimer);
+    stopInvalidating(entry);
     if (!entry.win.isDestroyed()) entry.win.destroy();
   }
 

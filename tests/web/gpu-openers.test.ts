@@ -4,9 +4,21 @@ import type { CaptureError as CaptureErrorType } from "../../src/renderer/publis
 
 type GpuOpeners = typeof import("../../src/renderer/publisher/gpu-openers");
 
+interface FakeStream {
+  kind: string;
+  track: { requestFrame: ReturnType<typeof vi.fn> };
+  getVideoTracks(): unknown[];
+}
+
+function fakeStream(kind: string): FakeStream {
+  const track = { requestFrame: vi.fn() };
+  return { kind, track, getVideoTracks: () => [track] };
+}
+
 interface FakePacker {
   width: number;
   height: number;
+  opts: unknown;
   canvas: { captureStream: ReturnType<typeof vi.fn> };
   draws: Array<{ w: number; h: number }>;
   disposed: boolean;
@@ -19,10 +31,10 @@ vi.mock("../../src/web/alpha/alpha-packer", () => {
   class AlphaPacker implements FakePacker {
     width: number;
     height: number;
-    canvas = { captureStream: vi.fn(() => ({ kind: "packer-stream" })) };
+    canvas = { captureStream: vi.fn(() => fakeStream("packer-stream")) };
     draws: Array<{ w: number; h: number }> = [];
     disposed = false;
-    constructor(width: number, height: number) {
+    constructor(width: number, height: number, readonly opts: unknown) {
       if (nextPackerThrows) {
         const err = nextPackerThrows;
         nextPackerThrows = null;
@@ -48,7 +60,7 @@ function fakeCanvas() {
     width: 0,
     height: 0,
     getContext: vi.fn(() => ctx),
-    captureStream: vi.fn(() => ({ kind: "url-stream" })),
+    captureStream: vi.fn(() => fakeStream("url-stream")),
     ctx,
   };
 }
@@ -128,6 +140,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -157,7 +170,10 @@ describe("openSpout", () => {
   it("opens successfully and dispose unregisters, closes spout, and disposes the packer", async () => {
     const capture = await gpuOpeners.openSpout(spoutSource);
     expect(spoutOpen).toHaveBeenCalledWith("s1", "OBS");
-    expect(capture.stream).toEqual({ kind: "packer-stream" });
+    expect(capture.stream).toMatchObject({ kind: "packer-stream" });
+    expect(packerInstances[0]?.opts).toEqual({ preserveDrawingBuffer: true });
+    // No frame rate: one frame per (throttled) draw.
+    expect(packerInstances[0]?.canvas.captureStream).toHaveBeenCalledWith();
 
     capture.dispose?.();
     expect(unregisterFns.get("s1")).toHaveBeenCalledTimes(1);
@@ -223,7 +239,8 @@ describe("openUrl", () => {
   it("opens successfully and dispose unregisters and closes the url capture", async () => {
     const capture = await gpuOpeners.openUrl(urlSource);
     expect(urlOpen).toHaveBeenCalledWith("u1");
-    expect(capture.stream).toEqual({ kind: "url-stream" });
+    expect(capture.stream).toMatchObject({ kind: "url-stream" });
+    expect(lastCanvas?.captureStream).toHaveBeenCalledWith();
 
     capture.dispose?.();
     expect(unregisterFns.get("u1")).toHaveBeenCalledTimes(1);
@@ -258,5 +275,64 @@ describe("openUrl", () => {
     nowValue = 5; // within the throttle gap: dropped
     sink?.(frame);
     expect(canvas?.ctx.drawImage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("idle refresh", () => {
+  const frame = { displayWidth: 10, displayHeight: 10 };
+  const useTimers = (): void => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  };
+
+  for (const [name, open, source] of [
+    ["openSpout", () => gpuOpeners.openSpout(spoutSource), spoutSource],
+    ["openUrl", () => gpuOpeners.openUrl(urlSource), urlSource],
+  ] as const) {
+    describe(name, () => {
+      it("re-sends the last frame each second while nothing is drawn", async () => {
+        useTimers();
+        const capture = await open();
+        const track = (capture.stream as unknown as FakeStream).track;
+        vi.advanceTimersByTime(1000);
+        expect(track.requestFrame).toHaveBeenCalledTimes(1);
+        nowValue = 2000;
+        vi.advanceTimersByTime(1000);
+        expect(track.requestFrame).toHaveBeenCalledTimes(2);
+      });
+
+      it("does not re-send while frames are being drawn", async () => {
+        useTimers();
+        const capture = await open();
+        const track = (capture.stream as unknown as FakeStream).track;
+        nowValue = 500;
+        sinks.get(source.id)?.(frame);
+        nowValue = 1000; // drew 500 ms ago
+        vi.advanceTimersByTime(1000);
+        expect(track.requestFrame).not.toHaveBeenCalled();
+      });
+
+      it("stops on dispose", async () => {
+        useTimers();
+        const capture = await open();
+        const track = (capture.stream as unknown as FakeStream).track;
+        capture.dispose?.();
+        vi.advanceTimersByTime(5000);
+        expect(track.requestFrame).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      });
+    });
+  }
+
+  it("skips tracks without requestFrame", async () => {
+    useTimers();
+    vi.stubGlobal("document", {
+      createElement: vi.fn(() => {
+        lastCanvas = fakeCanvas();
+        lastCanvas.captureStream.mockReturnValue({ kind: "no-request-frame", getVideoTracks: () => [{}] } as never);
+        return lastCanvas;
+      }),
+    });
+    await gpuOpeners.openUrl(urlSource);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

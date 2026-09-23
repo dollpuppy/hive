@@ -30,6 +30,10 @@ vi.mock("electron", async () => {
     frameRate = 0;
     loaded: string[] = [];
     reloads = 0;
+    invalidations = 0;
+    invalidate(): void {
+      this.invalidations += 1;
+    }
     setWindowOpenHandler(fn: () => unknown): void {
       this.windowOpenHandler = fn;
     }
@@ -83,6 +87,7 @@ interface FakeWebContents extends EventEmitter {
   frameRate: number;
   loaded: string[];
   reloads: number;
+  invalidations: number;
 }
 interface FakeWindow {
   options: { width: number; height: number; show: boolean; webPreferences: Record<string, unknown> };
@@ -388,6 +393,30 @@ describe("UrlSources", () => {
     sources.dispose();
     vi.advanceTimersByTime(60_000);
     expect(wc.loaded).toHaveLength(1);
+  });
+
+  it("invalidates on load and every second while open", () => {
+    vi.useFakeTimers();
+    sources.open("s1", "https://a.test", 100, 100, 30);
+    const wc = win(0).webContents;
+    wc.emit("did-finish-load");
+    expect(wc.invalidations).toBe(1);
+    vi.advanceTimersByTime(3000);
+    expect(wc.invalidations).toBe(4);
+    sources.close("s1");
+    vi.advanceTimersByTime(3000);
+    expect(wc.invalidations).toBe(4);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("stops invalidating when the webContents is destroyed", () => {
+    vi.useFakeTimers();
+    sources.open("s1", "https://a.test", 100, 100, 30);
+    const wc = win(0).webContents;
+    wc.emit("destroyed");
+    vi.advanceTimersByTime(3000);
+    expect(wc.invalidations).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("reloads a crashed renderer once after a second, only while still current", () => {
