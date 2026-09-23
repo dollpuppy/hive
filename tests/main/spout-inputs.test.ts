@@ -157,6 +157,34 @@ describe("SpoutInputs", () => {
     expect(inputs.senders()).toEqual(["Cam"]);
   });
 
+  it("closeAll disposes every receiver but keeps discovery and allows re-opening", () => {
+    inputs.start();
+    discovery().emit("added", [{ name: "Cam" }, { name: "Other" }]);
+    inputs.open("s1", "Cam");
+    inputs.open("s2", "Other");
+    inputs.closeAll();
+    expect(receiver(0).disposed).toBe(true);
+    expect(receiver(1).disposed).toBe(true);
+    expect(discovery().disposed).toBe(false);
+    expect(inputs.senders()).toEqual(["Cam", "Other"]);
+    discovery().emit("added", [{ name: "New" }]);
+    expect(events).toContainEqual(["New", true]);
+    inputs.open("s1", "Cam");
+    expect(receiver(2).started).toBe(true);
+  });
+
+  it("closeAll keeps a pending nudge for a stopped receiver", () => {
+    vi.useFakeTimers();
+    inputs.start();
+    discovery().emit("added", [{ name: "Cam" }]);
+    inputs.open("s1", "Cam");
+    receiver(0).emit("error", new ReceiverStoppedError(10));
+    inputs.closeAll();
+    events = [];
+    vi.advanceTimersByTime(3000);
+    expect(events).toEqual([["Cam", true]]);
+  });
+
   it("opens a started receiver targeting the publisher, tagged with the sourceId", () => {
     inputs.open("s1", "Cam");
     const r = receiver(0);

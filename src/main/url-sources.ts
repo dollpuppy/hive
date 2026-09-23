@@ -217,8 +217,14 @@ export class UrlSources {
     return this.sources.get(sourceId)?.drops ?? 0;
   }
 
-  dispose(): void {
+  /** Destroys every source's window. The instance stays usable (see dispose()). */
+  closeAll(): void {
     for (const id of [...this.sources.keys()]) this.close(id);
+  }
+
+  /** Same as closeAll(): nothing else is held, so the instance remains usable. */
+  dispose(): void {
+    this.closeAll();
   }
 }
 

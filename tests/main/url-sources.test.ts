@@ -308,6 +308,18 @@ describe("UrlSources", () => {
     expect(win(1).destroyed).toBe(true);
   });
 
+  it("closeAll destroys every window and leaves the instance reusable", () => {
+    sources.open("s1", "https://a.test", 100, 100, 30);
+    sources.open("s2", "https://b.test", 100, 100, 30);
+    sources.closeAll();
+    expect(win(0).destroyed).toBe(true);
+    expect(win(1).destroyed).toBe(true);
+    const handle = sources.open("s1", "https://a.test", 100, 100, 30);
+    expect(win(2).destroyed).toBe(false);
+    sources.close("s1", handle);
+    expect(win(2).destroyed).toBe(true);
+  });
+
   it("logs loadURL rejections instead of throwing", async () => {
     const warn = vi.mocked(console.warn);
     h.load.impl = () => Promise.reject(new Error("ERR_NAME_NOT_RESOLVED"));

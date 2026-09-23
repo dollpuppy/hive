@@ -171,6 +171,15 @@ export class SpoutInputs extends EventEmitter {
     entry.receiver.dispose();
   }
 
+  /**
+   * Closes every receiver but keeps discovery, backoff and pending nudges (nudges
+   * only re-emit availability). Used when the Publisher page restarts: its old
+   * receivers would otherwise keep delivering into a page that no longer listens.
+   */
+  closeAll(): void {
+    for (const id of [...this.receivers.keys()]) this.close(id);
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -180,7 +189,7 @@ export class SpoutInputs extends EventEmitter {
     this.nudges.clear();
     this.healthy.clear();
     this.backoff.clear();
-    for (const id of [...this.receivers.keys()]) this.close(id);
+    this.closeAll();
     this.known.clear();
     this.removeAllListeners();
   }
