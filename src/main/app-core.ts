@@ -9,7 +9,12 @@ import { joinPartner, type JoinHandle } from "./hub/joiner";
 import { startLocalServer, type LocalServer } from "./hub/local-server";
 import { viewerRoute } from "./hub/static-files";
 import { generateSecret } from "./invite";
+import { registerPublisherIpc } from "./publisher-ipc";
 import { createPublisherWindow, rendererDevUrl } from "./publisher-window";
+import { SpoutInputs } from "./spout/spout-inputs";
+import { desiredOutputs } from "./spout/spout-output-plan";
+import { SpoutOutputs } from "./spout/spout-outputs";
+import { UrlSources } from "./url-sources";
 
 export interface AppCore {
   config: HiveConfig;
@@ -20,7 +25,13 @@ export interface AppCore {
   configPath: string;
   /** The `--join=` link attempt, if any (stopped by shutdown()). */
   join: JoinHandle | null;
-  /** Stops joining, disconnects the partner, closes the server and the Publisher window. Idempotent. */
+  spoutInputs: SpoutInputs;
+  urlSources: UrlSources;
+  spoutOutputs: SpoutOutputs;
+  /**
+   * Stops joining, tears down Spout outputs, URL sources and Spout inputs, disconnects
+   * the partner, closes the Publisher window and the server. Idempotent.
+   */
   shutdown(): Promise<void>;
 }
 
@@ -77,6 +88,56 @@ export async function startAppCore(argv: string[]): Promise<AppCore> {
   });
   installDisplayMediaHandler(publisherContents);
 
+  // Never auto-select a client certificate for any page (URL sources load arbitrary
+  // configured sites): answering with no certificate continues without one.
+  app.on("select-client-certificate", (event, _wc, _url, _list, callback) => {
+    event.preventDefault();
+    callback();
+  });
+
+  // Spout inputs and URL sources deliver frames into the Publisher, tagged by sourceId.
+  const publisherTarget = () => (publisher.isDestroyed() ? null : publisherContents);
+  const spoutInputs = new SpoutInputs(publisherTarget);
+  const urlSources = new UrlSources(publisherTarget);
+  spoutInputs.on("availability", (name: string, available: boolean) => {
+    const target = publisherTarget();
+    if (target && !target.isDestroyed()) target.send("hive:publisher:spout-availability", name, available);
+  });
+  spoutInputs.start();
+  // NOTE(Plan 4): `config` is reassigned (`let`); the closure reads the current value.
+  // A single config store should replace this once the dashboard edits config.
+  registerPublisherIpc({
+    ipcMain,
+    isFromPublisher: (event) => isFromPublisher(publisherContents, event),
+    sources: () => config.sources,
+    spout: spoutInputs,
+    url: urlSources,
+  });
+
+  // A reloaded or crashed Publisher page no longer holds any of its opens, and
+  // SpoutInputs/UrlSources can't tell: drop every receiver and URL window so they stop
+  // forwarding into nowhere. The new page re-opens what it needs. (The very first load
+  // passes through here too; nothing is open yet, so it is a no-op — which also means
+  // nothing depends on catching that first event.) Spout discovery keeps running.
+  const closePublisherFeeds = (): void => {
+    spoutInputs.closeAll();
+    urlSources.closeAll();
+  };
+  publisherContents.on("did-start-navigation", (details) => {
+    if (details.isMainFrame && !details.isSameDocument) closePublisherFeeds();
+  });
+  publisherContents.on("render-process-gone", closePublisherFeeds);
+
+  // Spout outputs: one sender per enabled partner source, re-synced whenever the partner
+  // attaches, detaches or changes its source list.
+  const spoutOutputs = new SpoutOutputs(
+    () => `http://127.0.0.1:${server.port}`,
+    (key, err) => console.error(`[hive] spout output ${key}:`, err.message),
+  );
+  const syncSpoutOutputs = (): void => void spoutOutputs.sync(desiredOutputs(hub.partner, config.spoutOut));
+  hub.on("partner", syncSpoutOutputs);
+  syncSpoutOutputs();
+
   console.log(`[hive] local server http://127.0.0.1:${server.port}`);
   // The invite carries the secret; only print it in development.
   if (!app.isPackaged) console.log(`[hive] local invite  http://127.0.0.1:${server.port}/join#${inviteSecret}`);
@@ -99,12 +160,21 @@ export async function startAppCore(argv: string[]): Promise<AppCore> {
     inviteSecret,
     configPath,
     join: joinHandle,
+    spoutInputs,
+    urlSources,
+    spoutOutputs,
     shutdown: () => {
       shuttingDown ??= (async () => {
         // Stop the joiner first: hub.dispose() emits `partner: null`, which a live joiner
         // would answer by scheduling a reconnect.
         core.join?.stop();
         core.join = null;
+        // Spout outputs next: their offscreen viewer pages talk to the server and hub,
+        // and must not react to the partner leaving. Then everything forwarding into the
+        // Publisher, before the hub and the Publisher window go away.
+        spoutOutputs.disposeAll();
+        urlSources.dispose();
+        spoutInputs.dispose();
         hub.dispose();
         if (!publisher.isDestroyed()) publisher.destroy();
         await server.close();
