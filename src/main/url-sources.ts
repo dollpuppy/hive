@@ -4,7 +4,14 @@ import { forwardSharedTexture } from "@napolab/texture-bridge-core/electron";
 /** Non-persistent (no `persist:` prefix) session shared by every URL source. */
 export const URL_SOURCES_PARTITION = "hive-url-sources";
 
-const RELOAD_AFTER_CRASH_MS = 1000;
+/** First retry delay after a crash or failed load; doubles per failure in the window. */
+const RETRY_BASE_MS = 1000;
+/** Failures older than this no longer count towards the cap. */
+const RETRY_WINDOW_MS = 60_000;
+/** More failures than this within the window and the source stops retrying. */
+const MAX_RETRIES_PER_WINDOW = 3;
+/** Chromium's ERR_ABORTED: a navigation superseded by another, not a failure. */
+const ERR_ABORTED = -3;
 const MAX_ID_CHARS = 256;
 const MAX_DIMENSION = 8192;
 const MAX_FPS = 240;
@@ -52,7 +59,9 @@ interface UrlSource {
   readonly handle: number;
   readonly win: BrowserWindow;
   drops: number;
-  reloadTimer: ReturnType<typeof setTimeout> | null;
+  retryTimer: ReturnType<typeof setTimeout> | null;
+  /** Times of recent crashes/failed loads, for the retry backoff and cap. */
+  failures: number[];
 }
 
 /**
@@ -69,7 +78,7 @@ export class UrlSources {
 
   /**
    * Opens (or replaces) the source's window. Throws on invalid input (including any
-   * non-http(s) URL); load failures are only logged. Returns a handle identifying
+   * non-http(s) URL); crashes and failed loads are retried with backoff. Returns a handle identifying
    * this open, for `close(sourceId, handle)`.
    */
   open(sourceId: string, url: string, width: number, height: number, fps: number): number {
@@ -97,7 +106,7 @@ export class UrlSources {
         backgroundThrottling: false,
       },
     });
-    const entry: UrlSource = { handle: this.nextHandle++, win, drops: 0, reloadTimer: null };
+    const entry: UrlSource = { handle: this.nextHandle++, win, drops: 0, retryTimer: null, failures: [] };
     this.sources.set(sourceId, entry); // registered first so close() can always reach the window
     const wc = win.webContents;
     const isCurrent = (): boolean => this.sources.get(sourceId) === entry;
@@ -131,24 +140,42 @@ export class UrlSources {
       }
     });
 
-    wc.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
-      if (isMainFrame) {
-        console.warn(`[hive] url source ${sourceId} failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
+    const load = (): void => {
+      // A main-frame failure also fires did-fail-load, which schedules the retry.
+      wc.loadURL(url).catch((err: unknown) => {
+        console.warn(`[hive] url source ${sourceId} loadURL failed:`, err);
+      });
+    };
+    // One retry pending at a time. Each failure within RETRY_WINDOW_MS doubles the
+    // delay (1 s, 2 s, 4 s); a fourth failure within the window gives up.
+    const scheduleRetry = (retry: () => void): void => {
+      if (!isCurrent() || entry.retryTimer) return;
+      const now = Date.now();
+      entry.failures = entry.failures.filter((t) => now - t < RETRY_WINDOW_MS);
+      entry.failures.push(now);
+      const n = entry.failures.length;
+      if (n > MAX_RETRIES_PER_WINDOW) {
+        console.error(`[hive] url source ${sourceId}: ${n} failures within ${RETRY_WINDOW_MS / 1000} s, giving up`);
+        return;
       }
+      entry.retryTimer = setTimeout(() => {
+        entry.retryTimer = null;
+        if (isCurrent() && !win.isDestroyed()) retry();
+      }, RETRY_BASE_MS * 2 ** (n - 1));
+    };
+
+    wc.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame || errorCode === ERR_ABORTED) return;
+      console.warn(`[hive] url source ${sourceId} failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
+      scheduleRetry(load);
     });
     wc.on("render-process-gone", (_event, details) => {
       console.error(`[hive] url source ${sourceId} renderer gone: ${details.reason} (${details.exitCode})`);
-      if (!isCurrent() || entry.reloadTimer) return;
-      entry.reloadTimer = setTimeout(() => {
-        entry.reloadTimer = null;
-        if (isCurrent() && !win.isDestroyed()) wc.reload();
-      }, RELOAD_AFTER_CRASH_MS);
+      scheduleRetry(() => wc.reload());
     });
 
     wc.setFrameRate(fps);
-    wc.loadURL(url).catch((err: unknown) => {
-      console.warn(`[hive] url source ${sourceId} loadURL failed:`, err);
-    });
+    load();
     return entry.handle;
   }
 
@@ -162,7 +189,7 @@ export class UrlSources {
     if (!entry) return;
     if (handle !== undefined && entry.handle !== handle) return;
     this.sources.delete(sourceId);
-    if (entry.reloadTimer) clearTimeout(entry.reloadTimer);
+    if (entry.retryTimer) clearTimeout(entry.retryTimer);
     if (!entry.win.isDestroyed()) entry.win.destroy();
   }
 

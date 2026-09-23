@@ -127,6 +127,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  sources.dispose();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -317,6 +318,76 @@ describe("UrlSources", () => {
     warn.mockClear();
     win(0).webContents.emit("did-fail-load", {}, -105, "ERR_X", "https://ads.test/", false, 0, 0);
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("backs off crash reloads and gives up after more than 3 crashes in 60 s", () => {
+    vi.useFakeTimers();
+    const error = vi.mocked(console.error);
+    sources.open("s1", "https://a.test", 100, 100, 30);
+    const wc = win(0).webContents;
+    const crash = (): void => {
+      wc.emit("render-process-gone", {}, { reason: "crashed", exitCode: 1 });
+    };
+    crash();
+    vi.advanceTimersByTime(1000);
+    expect(wc.reloads).toBe(1);
+    crash();
+    vi.advanceTimersByTime(1999);
+    expect(wc.reloads).toBe(1);
+    vi.advanceTimersByTime(1);
+    expect(wc.reloads).toBe(2);
+    crash();
+    vi.advanceTimersByTime(4000);
+    expect(wc.reloads).toBe(3);
+    crash();
+    vi.advanceTimersByTime(60_000);
+    expect(wc.reloads).toBe(3);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("giving up"));
+  });
+
+  it("forgets crashes older than 60 s", () => {
+    vi.useFakeTimers();
+    sources.open("s1", "https://a.test", 100, 100, 30);
+    const wc = win(0).webContents;
+    for (let i = 0; i < 3; i++) {
+      wc.emit("render-process-gone", {}, { reason: "crashed", exitCode: 1 });
+      vi.advanceTimersByTime(4000);
+    }
+    expect(wc.reloads).toBe(3);
+    vi.advanceTimersByTime(61_000);
+    wc.emit("render-process-gone", {}, { reason: "crashed", exitCode: 1 });
+    vi.advanceTimersByTime(1000);
+    expect(wc.reloads).toBe(4);
+  });
+
+  it("retries a failed main-frame load with the same backoff", () => {
+    vi.useFakeTimers();
+    sources.open("s1", "https://a.test", 100, 100, 30);
+    const wc = win(0).webContents;
+    const fail = (code: number, main = true): void => {
+      wc.emit("did-fail-load", {}, code, "ERR", "https://a.test/", main, 0, 0);
+    };
+    fail(-105);
+    vi.advanceTimersByTime(1000);
+    expect(wc.loaded).toEqual(["https://a.test", "https://a.test"]);
+    fail(-105);
+    vi.advanceTimersByTime(2000);
+    expect(wc.loaded).toHaveLength(3);
+    // Aborted navigations and subframe failures are not retried.
+    fail(-3);
+    fail(-105, false);
+    vi.advanceTimersByTime(60_000);
+    expect(wc.loaded).toHaveLength(3);
+  });
+
+  it("close cancels a pending load retry", () => {
+    vi.useFakeTimers();
+    sources.open("s1", "https://a.test", 100, 100, 30);
+    const wc = win(0).webContents;
+    wc.emit("did-fail-load", {}, -105, "ERR", "https://a.test/", true, 0, 0);
+    sources.dispose();
+    vi.advanceTimersByTime(60_000);
+    expect(wc.loaded).toHaveLength(1);
   });
 
   it("reloads a crashed renderer once after a second, only while still current", () => {
