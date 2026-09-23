@@ -49,6 +49,7 @@ function urlSourcesSession(): Session {
 }
 
 interface UrlSource {
+  readonly handle: number;
   readonly win: BrowserWindow;
   drops: number;
   reloadTimer: ReturnType<typeof setTimeout> | null;
@@ -62,11 +63,16 @@ interface UrlSource {
  */
 export class UrlSources {
   private readonly sources = new Map<string, UrlSource>();
+  private nextHandle = 1;
 
   constructor(private readonly target: () => WebContents | null) {}
 
-  /** Throws on invalid input (including any non-http(s) URL); load failures are only logged. */
-  open(sourceId: string, url: string, width: number, height: number, fps: number): void {
+  /**
+   * Opens (or replaces) the source's window. Throws on invalid input (including any
+   * non-http(s) URL); load failures are only logged. Returns a handle identifying
+   * this open, for `close(sourceId, handle)`.
+   */
+  open(sourceId: string, url: string, width: number, height: number, fps: number): number {
     if (typeof sourceId !== "string" || sourceId === "" || sourceId.length > MAX_ID_CHARS) {
       throw new Error("invalid sourceId");
     }
@@ -91,7 +97,7 @@ export class UrlSources {
         backgroundThrottling: false,
       },
     });
-    const entry: UrlSource = { win, drops: 0, reloadTimer: null };
+    const entry: UrlSource = { handle: this.nextHandle++, win, drops: 0, reloadTimer: null };
     this.sources.set(sourceId, entry); // registered first so close() can always reach the window
     const wc = win.webContents;
     const isCurrent = (): boolean => this.sources.get(sourceId) === entry;
@@ -143,11 +149,18 @@ export class UrlSources {
     wc.loadURL(url).catch((err: unknown) => {
       console.warn(`[hive] url source ${sourceId} loadURL failed:`, err);
     });
+    return entry.handle;
   }
 
-  close(sourceId: string): void {
+  /**
+   * Destroys the source's window. With a `handle`, only closes if that open is still
+   * the current one, so a late close from a superseded open cannot kill its successor.
+   * Without one, closes unconditionally.
+   */
+  close(sourceId: string, handle?: number): void {
     const entry = this.sources.get(sourceId);
     if (!entry) return;
+    if (handle !== undefined && entry.handle !== handle) return;
     this.sources.delete(sourceId);
     if (entry.reloadTimer) clearTimeout(entry.reloadTimer);
     if (!entry.win.isDestroyed()) entry.win.destroy();

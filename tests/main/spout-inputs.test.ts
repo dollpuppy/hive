@@ -232,6 +232,29 @@ describe("SpoutInputs", () => {
     expect(events).toEqual([]);
   });
 
+  it("returns a distinct handle per open", () => {
+    const a = inputs.open("s1", "Cam");
+    const b = inputs.open("s1", "Cam");
+    const c = inputs.open("s2", "Cam");
+    expect(new Set([a, b, c]).size).toBe(3);
+  });
+
+  it("a close with a stale handle leaves the newer open running", () => {
+    const first = inputs.open("s1", "Cam");
+    const second = inputs.open("s1", "Cam");
+    inputs.close("s1", first);
+    expect(receiver(1).disposed).toBe(false);
+    inputs.close("s1", second);
+    expect(receiver(1).disposed).toBe(true);
+  });
+
+  it("a close without a handle always closes", () => {
+    inputs.open("s1", "Cam");
+    inputs.open("s1", "Cam");
+    inputs.close("s1");
+    expect(receiver(1).disposed).toBe(true);
+  });
+
   it("dispose stops discovery and disposes every receiver", () => {
     inputs.start();
     inputs.open("s1", "Cam");

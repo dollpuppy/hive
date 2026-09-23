@@ -37,8 +37,9 @@ export const openSpout: Opener = async (source: SourceConfig) => {
   const unregister = window.hiveFrames.register(source.id, (frame) => {
     if (due()) packer.draw(frame, frame.displayWidth, frame.displayHeight);
   });
+  let handle: number;
   try {
-    await window.hivePublisher.spoutOpen(source.id, source.senderName);
+    handle = await window.hivePublisher.spoutOpen(source.id, source.senderName);
   } catch {
     unregister();
     packer.dispose();
@@ -48,7 +49,7 @@ export const openSpout: Opener = async (source: SourceConfig) => {
     stream: packer.canvas.captureStream(spec.fps),
     dispose: () => {
       unregister();
-      window.hivePublisher.spoutClose(source.id).catch((err: unknown) => {
+      window.hivePublisher.spoutClose(source.id, handle).catch((err: unknown) => {
         console.error("[hive] spoutClose failed", source.id, err);
       });
       packer.dispose();
@@ -73,8 +74,9 @@ export const openUrl: Opener = async (source: SourceConfig) => {
     ctx.fillRect(0, 0, source.width, source.height);
     ctx.drawImage(frame, r.x, r.y, r.w, r.h);
   });
+  let handle: number;
   try {
-    await window.hivePublisher.urlOpen(source.id);
+    handle = await window.hivePublisher.urlOpen(source.id);
   } catch {
     unregister();
     throw new CaptureError("unavailable", `could not load ${source.url}`);
@@ -83,7 +85,7 @@ export const openUrl: Opener = async (source: SourceConfig) => {
     stream: canvas.captureStream(fps),
     dispose: () => {
       unregister();
-      window.hivePublisher.urlClose(source.id).catch((err: unknown) => {
+      window.hivePublisher.urlClose(source.id, handle).catch((err: unknown) => {
         console.error("[hive] urlClose failed", source.id, err);
       });
     },

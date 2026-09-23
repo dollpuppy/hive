@@ -23,6 +23,7 @@ export const NUDGE_MAX_MS = 60_000;
 export const NUDGE_HEALTHY_MS = 30_000;
 
 interface ReceiverEntry {
+  readonly handle: number;
   readonly senderName: string;
   readonly receiver: SharedTextureReceiverBridge;
 }
@@ -52,6 +53,7 @@ export class SpoutInputs extends EventEmitter {
   private readonly receivers = new Map<string, ReceiverEntry>();
   private started = false;
   private disposed = false;
+  private nextHandle = 1;
   /** Next nudge delay per sender (absent = NUDGE_INITIAL_MS). */
   private readonly backoff = new Map<string, number>();
   private readonly nudges = new Map<string, ReturnType<typeof setTimeout>>();
@@ -104,8 +106,9 @@ export class SpoutInputs extends EventEmitter {
    * receiver that source already had. Throws on invalid input, on Hive's own
    * outputs, when the Publisher is not ready, or when the sender does not exist;
    * on a throw the source's previous receiver (if any) is left untouched.
+   * Returns a handle identifying this open, for `close(sourceId, handle)`.
    */
-  open(sourceId: string, senderName: string): void {
+  open(sourceId: string, senderName: string): number {
     if (this.disposed) throw new Error("spout inputs disposed");
     requireName(sourceId, "sourceId", MAX_ID_CHARS);
     requireName(senderName, "sender name", MAX_SENDER_CHARS);
@@ -121,7 +124,7 @@ export class SpoutInputs extends EventEmitter {
       if (this.known.has(senderName)) this.scheduleNudge(senderName);
       throw err;
     }
-    const entry: ReceiverEntry = { senderName, receiver };
+    const entry: ReceiverEntry = { handle: this.nextHandle++, senderName, receiver };
     receiver.on("error", (err: Error) => {
       if (err instanceof ReceiverStoppedError) {
         // A stale receiver (sourceId since re-opened) must not tear down its successor.
@@ -139,11 +142,18 @@ export class SpoutInputs extends EventEmitter {
     this.receivers.set(sourceId, entry);
     receiver.start();
     this.markOpened(senderName);
+    return entry.handle;
   }
 
-  close(sourceId: string): void {
+  /**
+   * Stops delivering `sourceId`. With a `handle`, only closes if that open is still
+   * the current one, so a late close from a superseded open cannot kill its successor.
+   * Without one, closes unconditionally.
+   */
+  close(sourceId: string, handle?: number): void {
     const entry = this.receivers.get(sourceId);
     if (!entry) return;
+    if (handle !== undefined && entry.handle !== handle) return;
     this.receivers.delete(sourceId);
     entry.receiver.dispose();
   }

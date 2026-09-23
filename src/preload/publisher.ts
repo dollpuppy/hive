@@ -16,8 +16,9 @@ const api: HivePublisherApi = {
   },
   selectWindow: (title) => ipcRenderer.invoke("hive:publisher:select-window", title) as Promise<void>,
   spoutOpen: (sourceId, senderName) =>
-    ipcRenderer.invoke("hive:publisher:spout-open", sourceId, senderName) as Promise<void>,
-  spoutClose: (sourceId) => ipcRenderer.invoke("hive:publisher:spout-close", sourceId) as Promise<void>,
+    ipcRenderer.invoke("hive:publisher:spout-open", sourceId, senderName) as Promise<number>,
+  spoutClose: (sourceId, handle) =>
+    ipcRenderer.invoke("hive:publisher:spout-close", sourceId, handle) as Promise<void>,
   spoutSenders: () => ipcRenderer.invoke("hive:publisher:spout-senders") as Promise<string[]>,
   onSpoutAvailability: (listener) => {
     const handler = (_e: IpcRendererEvent, name: string, available: boolean): void => listener(name, available);
@@ -26,8 +27,8 @@ const api: HivePublisherApi = {
       ipcRenderer.removeListener("hive:publisher:spout-availability", handler);
     };
   },
-  urlOpen: (sourceId) => ipcRenderer.invoke("hive:publisher:url-open", sourceId) as Promise<void>,
-  urlClose: (sourceId) => ipcRenderer.invoke("hive:publisher:url-close", sourceId) as Promise<void>,
+  urlOpen: (sourceId) => ipcRenderer.invoke("hive:publisher:url-open", sourceId) as Promise<number>,
+  urlClose: (sourceId, handle) => ipcRenderer.invoke("hive:publisher:url-close", sourceId, handle) as Promise<void>,
 };
 
 // One receiving pool for every shared-texture producer (Spout receivers and URL

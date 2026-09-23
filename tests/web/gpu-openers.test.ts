@@ -94,9 +94,9 @@ beforeEach(async () => {
   nextPackerThrows = null;
   sinks = new Map();
   unregisterFns = new Map();
-  spoutOpen = vi.fn(async () => undefined);
+  spoutOpen = vi.fn(async () => 7);
   spoutClose = vi.fn(async () => undefined);
-  urlOpen = vi.fn(async () => undefined);
+  urlOpen = vi.fn(async () => 9);
   urlClose = vi.fn(async () => undefined);
   nowValue = 0;
   lastCanvas = undefined;
@@ -161,8 +161,18 @@ describe("openSpout", () => {
 
     capture.dispose?.();
     expect(unregisterFns.get("s1")).toHaveBeenCalledTimes(1);
-    expect(spoutClose).toHaveBeenCalledWith("s1");
+    expect(spoutClose).toHaveBeenCalledWith("s1", 7);
     expect(packerInstances[0]?.disposed).toBe(true);
+  });
+
+  it("each capture closes with its own open's handle", async () => {
+    spoutOpen.mockResolvedValueOnce(1).mockResolvedValueOnce(2);
+    const stale = await gpuOpeners.openSpout(spoutSource);
+    const current = await gpuOpeners.openSpout(spoutSource);
+    stale.dispose?.();
+    expect(spoutClose).toHaveBeenLastCalledWith("s1", 1);
+    current.dispose?.();
+    expect(spoutClose).toHaveBeenLastCalledWith("s1", 2);
   });
 
   it("swallows a rejected spoutClose instead of letting it go unhandled", async () => {
@@ -217,7 +227,17 @@ describe("openUrl", () => {
 
     capture.dispose?.();
     expect(unregisterFns.get("u1")).toHaveBeenCalledTimes(1);
-    expect(urlClose).toHaveBeenCalledWith("u1");
+    expect(urlClose).toHaveBeenCalledWith("u1", 9);
+  });
+
+  it("each capture closes with its own open's handle", async () => {
+    urlOpen.mockResolvedValueOnce(1).mockResolvedValueOnce(2);
+    const stale = await gpuOpeners.openUrl(urlSource);
+    const current = await gpuOpeners.openUrl(urlSource);
+    stale.dispose?.();
+    expect(urlClose).toHaveBeenLastCalledWith("u1", 1);
+    current.dispose?.();
+    expect(urlClose).toHaveBeenLastCalledWith("u1", 2);
   });
 
   it("swallows a rejected urlClose instead of letting it go unhandled", async () => {

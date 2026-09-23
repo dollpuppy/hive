@@ -276,6 +276,23 @@ describe("UrlSources", () => {
     sources.close("s1");
   });
 
+  it("returns a distinct handle per open; a stale-handle close is ignored", () => {
+    const first = sources.open("s1", "https://a.test", 100, 100, 30);
+    const second = sources.open("s1", "https://b.test", 100, 100, 30);
+    expect(second).not.toBe(first);
+    sources.close("s1", first);
+    expect(win(1).destroyed).toBe(false);
+    sources.close("s1", second);
+    expect(win(1).destroyed).toBe(true);
+  });
+
+  it("a close without a handle always closes", () => {
+    sources.open("s1", "https://a.test", 100, 100, 30);
+    sources.open("s1", "https://b.test", 100, 100, 30);
+    sources.close("s1");
+    expect(win(1).destroyed).toBe(true);
+  });
+
   it("dispose destroys every window", () => {
     sources.open("s1", "https://a.test", 100, 100, 30);
     sources.open("s2", "https://b.test", 100, 100, 30);
