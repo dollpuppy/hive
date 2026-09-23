@@ -102,6 +102,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -241,5 +242,140 @@ describe("SpoutInputs", () => {
     expect(receiver(1).disposed).toBe(true);
     expect(inputs.listenerCount("availability")).toBe(0);
     expect(() => inputs.open("s3", "Cam")).toThrow(/disposed/);
+  });
+});
+
+describe("SpoutInputs retry nudges", () => {
+  function startWith(name: string): void {
+    vi.useFakeTimers();
+    inputs.start();
+    discovery().emit("added", [{ name }]);
+    discovery().snapshot = [{ name }];
+    events = [];
+  }
+  const stop = (i: number): void => {
+    receiver(i).emit("error", new ReceiverStoppedError(10));
+  };
+
+  it("re-reports a stopped but still-listed sender available after 3 s", () => {
+    startWith("Cam");
+    inputs.open("s1", "Cam");
+    stop(0);
+    expect(events).toEqual([["Cam", false]]);
+    vi.advanceTimersByTime(2999);
+    expect(events).toEqual([["Cam", false]]);
+    vi.advanceTimersByTime(1);
+    expect(events).toEqual([
+      ["Cam", false],
+      ["Cam", true],
+    ]);
+  });
+
+  it("doubles the delay per consecutive failure, capped at 60 s", () => {
+    startWith("Cam");
+    const delays: number[] = [];
+    for (let i = 0; i < 7; i++) {
+      inputs.open("s1", "Cam");
+      stop(i);
+      events = [];
+      let waited = 0;
+      while (events.length === 0) {
+        vi.advanceTimersByTime(1000);
+        waited += 1000;
+      }
+      delays.push(waited);
+    }
+    expect(delays).toEqual([3000, 6000, 12000, 24000, 48000, 60000, 60000]);
+  });
+
+  it("nudges when receiver construction fails for a listed sender", () => {
+    startWith("Cam");
+    h.state.createThrows = new Error("open failed");
+    expect(() => inputs.open("s1", "Cam")).toThrow("open failed");
+    vi.advanceTimersByTime(3000);
+    expect(events).toEqual([["Cam", true]]);
+  });
+
+  it("does not nudge a failed open for an unknown sender", () => {
+    vi.useFakeTimers();
+    h.state.createThrows = new Error("no such sender");
+    expect(() => inputs.open("s1", "Gone")).toThrow();
+    vi.advanceTimersByTime(120_000);
+    expect(events).toEqual([]);
+  });
+
+  it("keeps at most one pending nudge per sender", () => {
+    startWith("Cam");
+    inputs.open("s1", "Cam");
+    inputs.open("s2", "Cam");
+    stop(0);
+    stop(1);
+    vi.advanceTimersByTime(60_000);
+    expect(events.filter(([, a]) => a)).toHaveLength(1);
+  });
+
+  it("drops the nudge when the sender disappears before it fires", () => {
+    startWith("Cam");
+    inputs.open("s1", "Cam");
+    stop(0);
+    discovery().snapshot = [];
+    discovery().emit("removed", [{ name: "Cam" }]);
+    vi.advanceTimersByTime(60_000);
+    expect(events).toEqual([
+      ["Cam", false],
+      ["Cam", false],
+    ]);
+  });
+
+  it("resets the backoff after an open survives 30 s", () => {
+    startWith("Cam");
+    inputs.open("s1", "Cam");
+    stop(0);
+    vi.advanceTimersByTime(3000); // nudge 1 (next would be 6 s)
+    inputs.open("s1", "Cam");
+    vi.advanceTimersByTime(30_000); // healthy: backoff reset
+    stop(1);
+    events = [];
+    vi.advanceTimersByTime(3000);
+    expect(events).toEqual([["Cam", true]]);
+  });
+
+  it("a stop within 30 s of opening keeps the backoff growing", () => {
+    startWith("Cam");
+    inputs.open("s1", "Cam");
+    stop(0);
+    vi.advanceTimersByTime(3000);
+    inputs.open("s1", "Cam");
+    vi.advanceTimersByTime(10_000);
+    stop(1);
+    events = [];
+    vi.advanceTimersByTime(5999);
+    expect(events).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(events).toEqual([["Cam", true]]);
+  });
+
+  it("a discovery re-add resets the backoff", () => {
+    startWith("Cam");
+    inputs.open("s1", "Cam");
+    stop(0);
+    vi.advanceTimersByTime(3000);
+    discovery().emit("added", [{ name: "Cam" }]);
+    inputs.open("s1", "Cam");
+    stop(1);
+    events = [];
+    vi.advanceTimersByTime(3000);
+    expect(events).toEqual([["Cam", true]]);
+  });
+
+  it("dispose clears pending nudges", () => {
+    startWith("Cam");
+    inputs.open("s1", "Cam");
+    stop(0);
+    const emit = vi.spyOn(inputs, "emit");
+    inputs.dispose();
+    vi.advanceTimersByTime(120_000);
+    expect(emit).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
