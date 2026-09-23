@@ -5,6 +5,7 @@ import { PublisherClient } from "../../web/publisher-client";
 import { CaptureManager } from "./capture-manager";
 import { openSpout, openUrl } from "./gpu-openers";
 import { openWebcam, openWindow } from "./openers";
+import { SpoutNames, applySpoutAvailability } from "./spout-names";
 
 const params = new URLSearchParams(location.search);
 const port = params.get("port");
@@ -14,7 +15,7 @@ const api: HivePublisherApi = window.hivePublisher;
 let sources: SourceConfig[] = [];
 // Spout sender names currently available, kept in sync by onSpoutAvailability events
 // and seeded from spoutSenders(). Source ids are mapped to names via `sources`.
-const spoutNames = new Set<string>();
+const spoutNames = new SpoutNames();
 
 // The manager and client call into each other; the arrow callbacks only run after both exist.
 const captures: CaptureManager = new CaptureManager({
@@ -36,9 +37,7 @@ const client: PublisherClient = new PublisherClient({
 function applySources(next: SourceConfig[]): void {
   sources = next;
   captures.setSources(next);
-  for (const s of next) {
-    if (s.kind === "spout") captures.setAvailability(s.id, spoutNames.has(s.senderName));
-  }
+  applySpoutAvailability(next, spoutNames, (id, available) => captures.setAvailability(id, available));
 }
 
 // Listen before fetching so a change pushed during the fetch is not lost; a pushed list
@@ -50,32 +49,24 @@ api.onSourcesChanged((next) => {
 });
 
 // Subscribe to availability before awaiting spoutSenders() so an event that arrives
-// during the fetch is not lost. The fetched snapshot can be stale relative to any event
-// that arrives while it's in flight, so we track which names an event has already
-// touched during the fetch and let those names win over the snapshot instead of the
-// snapshot clobbering them back.
-let fetchingSnapshot = true;
-const touchedDuringFetch = new Set<string>();
+// during the fetch is not lost (SpoutNames lets such events win over the snapshot).
+// Sources pushed while the fetch is in flight are applied against an incomplete name
+// set and read as "waiting", so availability is re-applied to every current Spout
+// source once the snapshot has merged (or the fetch has failed).
 api.onSpoutAvailability((name, available) => {
-  if (fetchingSnapshot) touchedDuringFetch.add(name);
-  if (available) spoutNames.add(name);
-  else spoutNames.delete(name);
+  spoutNames.update(name, available);
   for (const s of sources) {
     if (s.kind === "spout" && s.senderName === name) captures.setAvailability(s.id, available);
   }
 });
 try {
-  const snapshot = await api.spoutSenders();
-  fetchingSnapshot = false;
-  for (const name of snapshot) {
-    if (!touchedDuringFetch.has(name)) spoutNames.add(name);
-  }
+  spoutNames.loadSnapshot(await api.spoutSenders());
 } catch (err) {
-  fetchingSnapshot = false;
-  // Spout sources will read as "waiting" until an onSpoutAvailability "added" event
-  // arrives; acceptable degradation rather than blocking the whole page.
+  spoutNames.endFetch();
+  // Spout sources read as "waiting" until an onSpoutAvailability event reports them.
   console.error("hive publisher: could not load spout senders", err);
 }
+applySpoutAvailability(sources, spoutNames, (id, available) => captures.setAvailability(id, available));
 
 try {
   const initial = await api.getSources();
