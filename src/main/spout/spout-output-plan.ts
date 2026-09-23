@@ -25,27 +25,44 @@ export interface DesiredOutput {
 }
 
 /**
- * Truncates a UTF-8 string to at most `maxBytes`, never splitting a
- * multi-byte code point. Partner/source names are remote-controlled, so the
- * composed sender name must be safely bounded before it reaches the native
- * Spout sender (whose name buffer is a fixed size).
+ * Truncates a string to at most `maxBytes` of UTF-8, dropping whole code points so
+ * a surrogate pair (e.g. an emoji) is never split. Partner/source names are
+ * remote-controlled, so the composed sender name must be safely bounded before it
+ * reaches the native Spout sender (whose name buffer is a fixed size).
  */
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
-  let result = value;
-  while (Buffer.byteLength(result, "utf8") > maxBytes) {
-    result = result.slice(0, -1);
+  const points = Array.from(value);
+  let bytes = 0;
+  let end = 0;
+  for (const p of points) {
+    const n = Buffer.byteLength(p, "utf8");
+    if (bytes + n > maxBytes) break;
+    bytes += n;
+    end += 1;
   }
-  return result;
+  return points.slice(0, end).join("");
 }
 
-export function spoutOutputName(partnerName: string, sourceName: string): string {
-  const full = `${OWN_OUTPUT_PREFIX}${partnerName} - ${sourceName}`;
-  return truncateUtf8(full, MAX_SENDER_NAME_BYTES);
+/**
+ * The Spout sender name for a partner source. `suffix` (e.g. " (2)", to tell apart
+ * sources that share a display name) is kept whole: the base is truncated to make room.
+ */
+export function spoutOutputName(partnerName: string, sourceName: string, suffix = ""): string {
+  const base = `${OWN_OUTPUT_PREFIX}${partnerName} - ${sourceName}`;
+  return truncateUtf8(base, MAX_SENDER_NAME_BYTES - Buffer.byteLength(suffix, "utf8")) + suffix;
 }
 
+/**
+ * The outputs to run for `partner`, in `enabled` order. Two sources with the same
+ * display name (different slugs) would compose the same sender name, which Spout
+ * can't hold twice: the second gets " (2)", the third " (3)", and so on, in the
+ * partner's source-list order (not `enabled` order), so a source's name doesn't
+ * depend on which outputs are turned on.
+ */
 export function desiredOutputs(partner: Partner | null, enabled: SpoutOutputKey[]): DesiredOutput[] {
   if (!partner) return [];
+  const names = uniqueNames(partner);
   const seen = new Set<string>();
   return enabled.flatMap((e) => {
     if (e.partnerSlug !== partner.slug) return [];
@@ -57,7 +74,7 @@ export function desiredOutputs(partner: Partner | null, enabled: SpoutOutputKey[
     return [
       {
         key,
-        name: spoutOutputName(partner.name, source.name),
+        name: names.get(source.slug) ?? spoutOutputName(partner.name, source.name),
         path: `/s/${encodeURIComponent(partner.slug)}/${encodeURIComponent(source.slug)}`,
         width: source.width,
         height: source.height,
@@ -65,4 +82,18 @@ export function desiredOutputs(partner: Partner | null, enabled: SpoutOutputKey[
       },
     ];
   });
+}
+
+/** Sender name per source slug, numbered " (n)" where names (as truncated) collide. */
+function uniqueNames(partner: Partner): Map<string, string> {
+  const used = new Set<string>();
+  const names = new Map<string, string>();
+  for (const s of partner.sources) {
+    if (names.has(s.slug)) continue;
+    let name = spoutOutputName(partner.name, s.name);
+    for (let n = 2; used.has(name); n++) name = spoutOutputName(partner.name, s.name, ` (${n})`);
+    used.add(name);
+    names.set(s.slug, name);
+  }
+  return names;
 }
