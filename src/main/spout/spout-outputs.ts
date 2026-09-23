@@ -1,9 +1,15 @@
-import { createTextureBridge, type TextureBridge } from "@napolab/texture-bridge-renderer";
+import { createTextureBridge, type PaintDefect, type TextureBridge } from "@napolab/texture-bridge-renderer";
 import type { DesiredOutput } from "./spout-output-plan";
+
+/** Frame drops are logged at most this often per output. */
+export const DROP_LOG_INTERVAL_MS = 30_000;
 
 interface Active {
   bridge: TextureBridge;
   output: DesiredOutput;
+  drops: number;
+  lastDropLog: number;
+  suppressedDrops: number;
 }
 
 const toError = (err: unknown): Error => (err instanceof Error ? err : new Error(String(err)));
@@ -37,6 +43,15 @@ export class SpoutOutputs {
 
   keys(): string[] {
     return [...this.active.keys()];
+  }
+
+  /**
+   * `frameDropped` events seen from the output's current bridge. The bridge dedupes
+   * consecutive drops with the same reason, so this counts drop episodes (a new one
+   * starts after a successful send or a change of reason), not individual frames.
+   */
+  droppedFrames(key: string): number {
+    return this.active.get(key)?.drops ?? 0;
   }
 
   async sync(desired: DesiredOutput[]): Promise<void> {
@@ -98,8 +113,10 @@ export class SpoutOutputs {
         bridge.dispose();
         return;
       }
+      const entry: Active = { bridge, output: d, drops: 0, lastDropLog: -Infinity, suppressedDrops: 0 };
       bridge.on("error", (err: Error) => this.onError(d.key, err));
-      this.active.set(d.key, { bridge, output: d });
+      bridge.on("frameDropped", (defect: PaintDefect) => this.onFrameDropped(d.key, entry, defect));
+      this.active.set(d.key, entry);
       if (latest && !sameSpec(latest, d)) {
         // A resize/rename arrived mid-creation; re-run ensure with the
         // latest spec so the bridge converges instead of staying stale.
@@ -110,6 +127,19 @@ export class SpoutOutputs {
       this.pendingLatest.delete(d.key);
       this.onError(d.key, toError(err));
     }
+  }
+
+  private onFrameDropped(key: string, entry: Active, defect: PaintDefect): void {
+    entry.drops += 1;
+    const now = Date.now();
+    if (now - entry.lastDropLog < DROP_LOG_INTERVAL_MS) {
+      entry.suppressedDrops += 1;
+      return;
+    }
+    const note = entry.suppressedDrops > 0 ? ` (${entry.suppressedDrops} more since the last report)` : "";
+    entry.lastDropLog = now;
+    entry.suppressedDrops = 0;
+    console.warn(`[hive] spout output ${key} dropped a frame: ${defect.reason}${note}`);
   }
 
   private disable(key: string): void {

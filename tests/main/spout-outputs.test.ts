@@ -91,6 +91,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -220,5 +221,30 @@ describe("SpoutOutputs", () => {
     expect(outputs.keys()).toEqual([]);
     expect((h.state.bridges[0] as FakeBridge).disposed).toBe(true);
     expect((h.state.bridges[1] as FakeBridge).disposed).toBe(true);
+  });
+
+  it("counts frameDropped events per output and logs at most once per 30 s", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    void outputs.sync([output(), output({ key: "p/t", name: "Hive - Partner - T", path: "/s/p/t" })]);
+    const a = resolveCreate(0);
+    const b = resolveCreate(1);
+    await flush();
+    for (let i = 0; i < 5; i++) a.emit("frameDropped", { reason: "no-texture" });
+    b.emit("frameDropped", { reason: "no-nt-handle" });
+    expect(outputs.droppedFrames("p/s")).toBe(5);
+    expect(outputs.droppedFrames("p/t")).toBe(1);
+    expect(outputs.droppedFrames("nope")).toBe(0);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith("[hive] spout output p/s dropped a frame: no-texture");
+    vi.advanceTimersByTime(29_999);
+    a.emit("frameDropped", { reason: "no-texture" });
+    expect(warn).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(1);
+    a.emit("frameDropped", { reason: "no-texture" });
+    expect(warn).toHaveBeenCalledTimes(3);
+    expect(warn).toHaveBeenLastCalledWith("[hive] spout output p/s dropped a frame: no-texture (5 more since the last report)");
+    expect(outputs.droppedFrames("p/s")).toBe(7);
   });
 });
