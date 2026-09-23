@@ -232,7 +232,7 @@ describe("openUrl", () => {
     const err = await gpuOpeners.openUrl(urlSource).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CaptureError);
     expect(err).toMatchObject({ status: "unavailable" });
-    expect((err as CaptureErrorType).message).toContain(urlSource.url);
+    expect((err as CaptureErrorType).message).toBe('URL source "Url" could not be opened: load failed');
     expect(unregisterFns.get("u1")).toHaveBeenCalledTimes(1);
   });
 

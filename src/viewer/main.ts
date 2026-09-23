@@ -18,7 +18,12 @@ if (params.get("fit") === "cover") document.body.classList.add("cover");
 
 let unpacker: AlphaUnpacker | null = null;
 let unpackerFailed = false;
-let raf = 0;
+
+// Unpack once per decoded video frame when the browser can tell us about them;
+// otherwise once per display refresh.
+const hasVideoFrameCallback = "requestVideoFrameCallback" in HTMLVideoElement.prototype;
+/** Cancels the pending callback of the running loop; a no-op when stopped. */
+let cancelLoop = (): void => {};
 
 function startAlphaLoop(): void {
   if (unpackerFailed) return;
@@ -33,21 +38,40 @@ function startAlphaLoop(): void {
       return;
     }
   }
-  const tick = (): void => {
-    try {
-      if (video.readyState >= video.HAVE_CURRENT_DATA) {
-        unpacker?.draw(video, video.videoWidth, video.videoHeight);
-      }
-    } finally {
-      raf = requestAnimationFrame(tick);
+  cancelLoop();
+  const draw = (): void => {
+    if (video.readyState >= video.HAVE_CURRENT_DATA) {
+      unpacker?.draw(video, video.videoWidth, video.videoHeight);
     }
   };
-  cancelAnimationFrame(raf);
-  raf = requestAnimationFrame(tick);
+  if (hasVideoFrameCallback) {
+    let id = 0;
+    const tick = (): void => {
+      try {
+        draw();
+      } finally {
+        id = video.requestVideoFrameCallback(tick);
+      }
+    };
+    id = video.requestVideoFrameCallback(tick);
+    cancelLoop = () => video.cancelVideoFrameCallback(id);
+  } else {
+    let id = 0;
+    const tick = (): void => {
+      try {
+        draw();
+      } finally {
+        id = requestAnimationFrame(tick);
+      }
+    };
+    id = requestAnimationFrame(tick);
+    cancelLoop = () => cancelAnimationFrame(id);
+  }
 }
 
 function stopAlphaLoop(): void {
-  cancelAnimationFrame(raf);
+  cancelLoop();
+  cancelLoop = () => {};
   unpacker?.clear();
 }
 

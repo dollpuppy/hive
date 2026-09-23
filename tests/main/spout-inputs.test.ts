@@ -49,7 +49,9 @@ vi.mock("@napolab/texture-bridge-renderer", async () => {
       this.started = true;
     }
     dispose(): void {
+      // Like the real receiver, disposal detaches every listener.
       this.disposed = true;
+      this.removeAllListeners();
     }
   }
   return {
@@ -226,10 +228,27 @@ describe("SpoutInputs", () => {
 
   it("a stale receiver's stop does not close the newer receiver for the same sourceId", () => {
     inputs.open("s1", "Cam");
+    // Grab the handler before re-opening detaches it, as if the stop was already queued.
+    const staleHandler = receiver(0).listeners("error")[0] as (err: Error) => void;
     inputs.open("s1", "Cam");
-    receiver(0).emit("error", new ReceiverStoppedError(10));
+    expect(receiver(0).listenerCount("error")).toBe(0);
+    staleHandler(new ReceiverStoppedError(10));
     expect(receiver(1).disposed).toBe(false);
     expect(events).toEqual([]);
+  });
+
+  it("rate-limits non-stop receiver error logs per receiver", () => {
+    vi.useFakeTimers();
+    const warn = vi.mocked(console.warn);
+    inputs.open("s1", "Cam");
+    inputs.open("s2", "Other");
+    for (let i = 0; i < 5; i++) receiver(0).emit("error", new Error("import failed"));
+    receiver(1).emit("error", new Error("import failed"));
+    expect(warn).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(5000);
+    receiver(0).emit("error", new Error("import failed"));
+    expect(warn).toHaveBeenCalledTimes(3);
+    expect(warn).toHaveBeenLastCalledWith(expect.stringContaining("4 similar errors suppressed"), expect.any(Error));
   });
 
   it("returns a distinct handle per open", () => {

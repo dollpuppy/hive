@@ -119,9 +119,11 @@ export const openUrl: Opener = async (source: SourceConfig) => {
   let handle: number;
   try {
     handle = await window.hivePublisher.urlOpen(source.id);
-  } catch {
+  } catch (err) {
+    // urlOpen only rejects on invalid input/config; page load failures are retried in main.
     unregister();
-    throw new CaptureError("unavailable", `could not load ${source.url}`);
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new CaptureError("unavailable", `URL source "${source.name}" could not be opened: ${reason}`);
   }
   // No frame rate: one frame per draw (already throttled), plus idle refreshes.
   const stream = canvas.captureStream();

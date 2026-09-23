@@ -158,6 +158,7 @@ describe("UrlSources", () => {
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
+      disableDialogs: true,
       backgroundThrottling: false,
     });
     expect(w.options.webPreferences).not.toHaveProperty("preload");

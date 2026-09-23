@@ -21,6 +21,8 @@ export const NUDGE_INITIAL_MS = 3000;
 export const NUDGE_MAX_MS = 60_000;
 /** An open whose receiver runs this long without stopping resets the sender's backoff. */
 export const NUDGE_HEALTHY_MS = 30_000;
+/** Non-stop receiver errors are logged at most this often per receiver. */
+export const ERROR_LOG_INTERVAL_MS = 5000;
 
 interface ReceiverEntry {
   readonly handle: number;
@@ -125,6 +127,8 @@ export class SpoutInputs extends EventEmitter {
       throw err;
     }
     const entry: ReceiverEntry = { handle: this.nextHandle++, senderName, receiver };
+    let lastErrorLog = -Infinity;
+    let suppressedErrors = 0;
     receiver.on("error", (err: Error) => {
       if (err instanceof ReceiverStoppedError) {
         // A stale receiver (sourceId since re-opened) must not tear down its successor.
@@ -135,7 +139,16 @@ export class SpoutInputs extends EventEmitter {
         this.emit("availability", senderName, false);
         this.scheduleNudge(senderName);
       } else {
-        console.warn(`[hive] spout receiver ${senderName}`, err);
+        // Per-frame errors (e.g. failed imports) can repeat at the frame rate.
+        const now = Date.now();
+        if (now - lastErrorLog < ERROR_LOG_INTERVAL_MS) {
+          suppressedErrors += 1;
+          return;
+        }
+        lastErrorLog = now;
+        const note = suppressedErrors > 0 ? ` (${suppressedErrors} similar errors suppressed)` : "";
+        suppressedErrors = 0;
+        console.warn(`[hive] spout receiver ${senderName}${note}`, err);
       }
     });
     this.close(sourceId);

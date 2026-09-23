@@ -114,6 +114,7 @@ export class UrlSources {
         contextIsolation: true,
         nodeIntegration: false,
         webviewTag: false,
+        disableDialogs: true,
         backgroundThrottling: false,
       },
     });
