@@ -1,15 +1,13 @@
 import { PRESETS } from "../../shared/presets";
+import { OWN_OUTPUT_PREFIX, spoutOutputName } from "../../shared/spout-name";
 import { URL_SOURCE_MAX_HEIGHT, URL_SOURCE_MAX_WIDTH } from "../config/config-store";
 import type { Partner } from "../hub/hub";
 
-/** Hive's own Spout outputs; hidden from the input picker to avoid feedback loops. */
-export const OWN_OUTPUT_PREFIX = "Hive - ";
-
-/**
- * Spout sender names are stored in a fixed 256-byte buffer including a
- * trailing NUL terminator, so the usable name is at most 255 bytes.
- */
-const MAX_SENDER_NAME_BYTES = 255;
+// Sender-name composition is pure and has no Node/main-process dependencies, so it lives in
+// shared/spout-name.ts (the dashboard renderer imports it directly from there — it must not
+// pull in this module's `node:*`/zod-backed config-store import). Re-exported here so existing
+// main-process imports (spout-inputs.ts, tests) keep working unchanged.
+export { OWN_OUTPUT_PREFIX, spoutOutputName };
 
 /**
  * Bounds for partner-advertised sizes. The protocol accepts up to 7680×4320 @ 240 fps,
@@ -46,35 +44,6 @@ export interface DesiredOutput {
   width: number;
   height: number;
   fps: number;
-}
-
-/**
- * Truncates a string to at most `maxBytes` of UTF-8, dropping whole code points so
- * a surrogate pair (e.g. an emoji) is never split. Partner/source names are
- * remote-controlled, so the composed sender name must be safely bounded before it
- * reaches the native Spout sender (whose name buffer is a fixed size).
- */
-function truncateUtf8(value: string, maxBytes: number): string {
-  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
-  const points = Array.from(value);
-  let bytes = 0;
-  let end = 0;
-  for (const p of points) {
-    const n = Buffer.byteLength(p, "utf8");
-    if (bytes + n > maxBytes) break;
-    bytes += n;
-    end += 1;
-  }
-  return points.slice(0, end).join("");
-}
-
-/**
- * The Spout sender name for a partner source. `suffix` (e.g. " (2)", to tell apart
- * sources that share a display name) is kept whole: the base is truncated to make room.
- */
-export function spoutOutputName(partnerName: string, sourceName: string, suffix = ""): string {
-  const base = `${OWN_OUTPUT_PREFIX}${partnerName} - ${sourceName}`;
-  return truncateUtf8(base, MAX_SENDER_NAME_BYTES - Buffer.byteLength(suffix, "utf8")) + suffix;
 }
 
 /**
