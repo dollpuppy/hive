@@ -49,8 +49,15 @@ export class SessionController extends EventEmitter {
   private readonly newId: () => string;
   private readonly spoutGraceMs: number;
   private spoutGraceTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Set by a kick (ours or theirs) or by `leave()`, so the next `partner: null` skips the grace period. */
+  /** Set by a kick (ours or theirs), so the next `partner: null` skips the grace period. */
   private kickOrLeavePending = false;
+  /**
+   * Mirrors `hub.partner !== null`. `onPartnerChanged` fires for every transition Hub makes
+   * (established / onPeerClose), so this tracks the same thing `hub.partner` would tell us, but
+   * lets `leave()` reason synchronously about "were we actually connected" without depending on
+   * Hub's own getter having already been updated by the time `leave()` runs.
+   */
+  private hasPartner = false;
 
   constructor(private readonly deps: SessionDeps) {
     super();
@@ -58,7 +65,7 @@ export class SessionController extends EventEmitter {
     this.newId = deps.newId ?? randomUUID;
     this.spoutGraceMs = deps.spoutGraceMs ?? 60_000;
     // Amendment 6: app-core used to clear a stray secret at startup; that now lives here.
-    if (!this.cfg.keepSecret && this.cfg.secret !== null) void this.persist({ ...this.cfg, secret: null });
+    if (!this.cfg.keepSecret && this.cfg.secret !== null) this.persistInBackground({ ...this.cfg, secret: null });
     deps.hub.on("partner", (partner: Partner | null) => this.onPartnerChanged(partner));
     deps.hub.on("local-sources", () => this.changed());
     deps.hub.on("watchers", () => this.changed());
@@ -132,7 +139,9 @@ export class SessionController extends EventEmitter {
     const status = this.deps.tunnel.state.status;
     if (status !== "stopped" && status !== "failed") return;
     this.secret = this.cfg.keepSecret && this.cfg.secret ? this.cfg.secret : generateSecret();
-    if (this.cfg.keepSecret && this.cfg.secret !== this.secret) void this.persist({ ...this.cfg, secret: this.secret });
+    if (this.cfg.keepSecret && this.cfg.secret !== this.secret) {
+      this.persistInBackground({ ...this.cfg, secret: this.secret });
+    }
     this.banners.delete("tunnel-failed");
     this.deps.tunnel.start(this.deps.port);
     this.changed();
@@ -170,9 +179,19 @@ export class SessionController extends EventEmitter {
   }
 
   leave(): void {
-    this.kickOrLeavePending = true;
     this.stopJoin();
     this.joinState = { status: "idle", detail: null };
+    // Fix round 1, issue 1: only defer to the grace period when we were actually connected — a
+    // leave() with no live partner (still connecting/reconnecting/failed, or already dropped and
+    // sitting in the grace window) must flush immediately, and must NOT set the flag: leaving
+    // that flag set would make a later, unrelated genuine drop skip its grace period.
+    if (this.hasPartner) {
+      this.kickOrLeavePending = true;
+    } else {
+      this.kickOrLeavePending = false;
+      this.clearSpoutGrace();
+      this.deps.syncSpoutOutputs(null, this.cfg.spoutOut);
+    }
     this.changed();
   }
 
@@ -209,11 +228,17 @@ export class SessionController extends EventEmitter {
 
   async setSpoutOut(partnerSlug: string, sourceSlug: string, enabled: boolean): Promise<void> {
     const rest = this.cfg.spoutOut.filter((k) => !(k.partnerSlug === partnerSlug && k.sourceSlug === sourceSlug));
-    await this.persist({ ...this.cfg, spoutOut: enabled ? [...rest, { partnerSlug, sourceSlug }] : rest });
+    const config = { ...this.cfg, spoutOut: enabled ? [...rest, { partnerSlug, sourceSlug }] : rest };
+    // Fix round 1, issue 2: apply state + every side effect + changed() before awaiting the save,
+    // so a rejected save leaves the controller's in-memory state (and everything derived from it —
+    // Hub, the Publisher, Spout outputs) consistent with each other. The awaited save below still
+    // rejects to this method's own caller, so the UI can surface "couldn't save".
+    this.cfg = config;
     // Amendment 5: turning a toggle back on clears its previous inline error.
     if (enabled) this.spoutOutErrors.delete(`${partnerSlug}/${sourceSlug}`);
     this.deps.syncSpoutOutputs(this.deps.hub.partner, this.cfg.spoutOut);
     this.changed();
+    await this.deps.saveConfig(config);
   }
 
   /** Spec §10: a failed Spout output reverts its toggle and reports inline. */
@@ -221,7 +246,12 @@ export class SessionController extends EventEmitter {
     const [partnerSlug = "", sourceSlug = ""] = key.split("/");
     this.spoutOutErrors.set(key, error.message);
     this.banner("spout-output-failed", `Spout output failed: ${error.message}`);
-    void this.setSpoutOut(partnerSlug, sourceSlug, false);
+    // Fire-and-forget: the toggle is already reflected in state() by the time setSpoutOut's own
+    // synchronous side effects run above; only the save can fail, and there is no caller here to
+    // reject to, so it must be caught to avoid an unhandled rejection.
+    this.setSpoutOut(partnerSlug, sourceSlug, false).catch((err: unknown) => {
+      console.error("Hive: failed to persist a reverted Spout output toggle", err);
+    });
   }
 
   // --------------------------------------------------------------- settings
@@ -233,9 +263,11 @@ export class SessionController extends EventEmitter {
     const turn = input.turn && url ? { url, username: input.turn.username, credential: input.turn.credential } : null;
     if (turn && !/^turns?:/.test(turn.url)) throw new Error("TURN URL must start with turn: or turns:");
     const secret = input.keepSecret ? (this.cfg.secret ?? this.secret ?? generateSecret()) : null;
-    await this.persist({ ...this.cfg, displayName, turn, keepSecret: input.keepSecret, secret });
+    const config = { ...this.cfg, displayName, turn, keepSecret: input.keepSecret, secret };
+    this.cfg = config;
     this.deps.hub.setDisplayName(displayName);
     this.changed();
+    await this.deps.saveConfig(config);
   }
 
   dismissBanner(id: BannerId): void {
@@ -244,7 +276,9 @@ export class SessionController extends EventEmitter {
   }
 
   async saveWindowBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<void> {
-    await this.persist({ ...this.cfg, windowBounds: bounds });
+    const config = { ...this.cfg, windowBounds: bounds };
+    this.cfg = config;
+    await this.deps.saveConfig(config);
   }
 
   dispose(): void {
@@ -267,6 +301,7 @@ export class SessionController extends EventEmitter {
    * the Hub's `kicked`/`kicked-partner` events) or our own `leave()` skips the grace period.
    */
   private onPartnerChanged(partner: Partner | null): void {
+    this.hasPartner = partner !== null;
     if (partner) {
       this.clearSpoutGrace();
       this.deps.syncSpoutOutputs(partner, this.cfg.spoutOut);
@@ -322,11 +357,13 @@ export class SessionController extends EventEmitter {
   }
 
   private async applySources(sources: SourceConfig[]): Promise<void> {
-    await this.persist({ ...this.cfg, sources });
+    const config = { ...this.cfg, sources };
+    this.cfg = config;
     const statuses = new Map<string, SourceStatus>(this.deps.hub.sources.map((s) => [s.id, s.status]));
     this.deps.hub.setLocalSources(sources.map((s) => sourceInfoFromConfig(s, statuses.get(s.id) ?? "idle")));
     this.deps.notifyPublisherSources(sources);
     this.changed();
+    await this.deps.saveConfig(config);
   }
 
   private onTunnel(state: TunnelState): void {
@@ -345,9 +382,16 @@ export class SessionController extends EventEmitter {
     this.changed();
   }
 
-  private async persist(config: HiveConfig): Promise<void> {
+  /**
+   * Fire-and-forget config write for sites with no caller to reject to (constructor cleanup, the
+   * secret rotated on `startServer()`). Applies in-memory state synchronously — state() must
+   * reflect it immediately — and logs instead of throwing if the save itself fails.
+   */
+  private persistInBackground(config: HiveConfig): void {
     this.cfg = config;
-    await this.deps.saveConfig(config);
+    this.deps.saveConfig(config).catch((err: unknown) => {
+      console.error("Hive: failed to save config", err);
+    });
   }
 
   private changed(): void {

@@ -34,7 +34,12 @@ let hub: Hub;
 let session: SessionController;
 let ids: number;
 
-function make(config: Partial<HiveConfig> = {}, port = 7420, spoutGraceMs?: number): void {
+function make(
+  config: Partial<HiveConfig> = {},
+  port = 7420,
+  spoutGraceMs?: number,
+  saveConfigImpl?: (c: HiveConfig) => Promise<void>,
+): void {
   saved = [];
   published = [];
   synced = [];
@@ -44,9 +49,11 @@ function make(config: Partial<HiveConfig> = {}, port = 7420, spoutGraceMs?: numb
   hub = new Hub({ displayName: "Ana", getInviteSecret: () => session.inviteSecret, getIceServers: () => session.iceServers });
   session = new SessionController({
     config: { ...defaultConfig(), displayName: "Ana", ...config },
-    saveConfig: async (c) => {
-      saved.push(c);
-    },
+    saveConfig:
+      saveConfigImpl ??
+      (async (c) => {
+        saved.push(c);
+      }),
     hub,
     port,
     tunnel,
@@ -360,5 +367,121 @@ describe("spout output grace period (amendment 4)", () => {
     session.dispose();
     vi.advanceTimersByTime(60_000);
     expect(synced).toEqual([]);
+  });
+
+  it("leave() with no live partner flushes immediately and does not leave the flag stuck (fix round 1, issue 1, scenario A)", () => {
+    session.join("https://a.trycloudflare.com/join#S");
+    synced.length = 0;
+    session.leave();
+    expect(synced).toEqual([[null, []]]);
+    // A later, unrelated genuine connect+drop must still get the full grace period — if leave()
+    // had left kickOrLeavePending stuck, this would sync immediately instead of waiting 60s.
+    synced.length = 0;
+    hub.emit("partner", bo);
+    synced.length = 0;
+    hub.emit("partner", null);
+    expect(synced).toEqual([]);
+    vi.advanceTimersByTime(60_000);
+    expect(synced).toEqual([[null, []]]);
+  });
+
+  it("leave() during an active grace window flushes immediately instead of waiting out the timer (fix round 1, issue 1, scenario B)", () => {
+    hub.emit("partner", bo);
+    synced.length = 0;
+    hub.emit("partner", null);
+    vi.advanceTimersByTime(1_000);
+    expect(synced).toEqual([]);
+    session.leave();
+    expect(synced).toEqual([[null, []]]);
+    vi.advanceTimersByTime(60_000);
+    expect(synced).toHaveLength(1);
+  });
+});
+
+describe("save failures (fix round 1, issue 2)", () => {
+  let unhandled: unknown[];
+  const onUnhandledRejection = (err: unknown): void => {
+    unhandled.push(err);
+  };
+
+  beforeEach(() => {
+    unhandled = [];
+    process.on("unhandledRejection", onUnhandledRejection);
+  });
+  afterEach(() => {
+    process.off("unhandledRejection", onUnhandledRejection);
+  });
+
+  it("applySources applies its side effects even when the save rejects, and still rejects to the caller", async () => {
+    make({}, 7420, undefined, async () => {
+      throw new Error("disk full");
+    });
+    await expect(
+      session.addSource({ kind: "window", name: "Game", preset: "med", windowTitle: "A" }),
+    ).rejects.toThrow("disk full");
+    // Side effects ran before the save was awaited: source is in state, hub and publisher got it.
+    expect(last().sources.map((s) => s.slug)).toEqual(["game"]);
+    expect(hub.sources.map((s) => s.slug)).toEqual(["game"]);
+    expect(published.at(-1)).toHaveLength(1);
+  });
+
+  it("setSpoutOut applies its side effects even when the save rejects, and still rejects to the caller", async () => {
+    make({}, 7420, undefined, async () => {
+      throw new Error("disk full");
+    });
+    await expect(session.setSpoutOut("bo", "vtuber", true)).rejects.toThrow("disk full");
+    expect(last().spoutOut).toEqual([{ partnerSlug: "bo", sourceSlug: "vtuber" }]);
+    expect(synced.at(-1)).toEqual([null, [{ partnerSlug: "bo", sourceSlug: "vtuber" }]]);
+  });
+
+  it("updateSettings applies its side effects even when the save rejects, and still rejects to the caller", async () => {
+    make({}, 7420, undefined, async () => {
+      throw new Error("disk full");
+    });
+    await expect(
+      session.updateSettings({ displayName: "New Name", turn: null, keepSecret: false }),
+    ).rejects.toThrow("disk full");
+    expect(last().displayName).toBe("New Name");
+  });
+
+  it("a rejecting save from startServer's fire-and-forget secret rotation logs and does not throw or go unhandled", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    // keepSecret with no stored secret yet: startServer() generates one and persists it in the
+    // background (fire-and-forget — there is no caller here to reject to).
+    make({ keepSecret: true, secret: null }, 7420, undefined, async () => {
+      throw new Error("disk full");
+    });
+    session.startServer();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(errorSpy).toHaveBeenCalled();
+    expect(unhandled).toEqual([]);
+    errorSpy.mockRestore();
+  });
+
+  it("a rejecting save from reportSpoutOutputError's fire-and-forget revert logs and does not go unhandled", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    make({}, 7420, undefined, async () => {
+      throw new Error("disk full");
+    });
+    await session.setSpoutOut("bo", "vtuber", true).catch(() => undefined);
+    session.reportSpoutOutputError("bo/vtuber", new Error("name collision"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(last().spoutOut).toEqual([]);
+    expect(last().spoutOutErrors).toEqual({ "bo/vtuber": "name collision" });
+    expect(errorSpy).toHaveBeenCalled();
+    expect(unhandled).toEqual([]);
+    errorSpy.mockRestore();
+  });
+
+  it("a rejecting save from the constructor's stray-secret cleanup logs and does not go unhandled", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    make({ keepSecret: false, secret: "leftover" }, 7420, undefined, async () => {
+      throw new Error("disk full");
+    });
+    expect(session.config.secret).toBeNull();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(errorSpy).toHaveBeenCalled();
+    expect(unhandled).toEqual([]);
+    errorSpy.mockRestore();
   });
 });
