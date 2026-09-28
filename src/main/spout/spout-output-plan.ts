@@ -1,5 +1,5 @@
 import { PRESETS } from "../../shared/presets";
-import { OWN_OUTPUT_PREFIX, spoutOutputName } from "../../shared/spout-name";
+import { OWN_OUTPUT_PREFIX, spoutOutputName, spoutOutputNames } from "../../shared/spout-name";
 import { URL_SOURCE_MAX_HEIGHT, URL_SOURCE_MAX_WIDTH } from "../config/config-store";
 import type { Partner } from "../hub/hub";
 
@@ -7,7 +7,7 @@ import type { Partner } from "../hub/hub";
 // shared/spout-name.ts (the dashboard renderer imports it directly from there — it must not
 // pull in this module's `node:*`/zod-backed config-store import). Re-exported here so existing
 // main-process imports (spout-inputs.ts, tests) keep working unchanged.
-export { OWN_OUTPUT_PREFIX, spoutOutputName };
+export { OWN_OUTPUT_PREFIX, spoutOutputName, spoutOutputNames };
 
 /**
  * Bounds for partner-advertised sizes. The protocol accepts up to 7680×4320 @ 240 fps,
@@ -56,7 +56,7 @@ export interface DesiredOutput {
  */
 export function desiredOutputs(partner: Partner | null, enabled: SpoutOutputKey[]): DesiredOutput[] {
   if (!partner) return [];
-  const names = uniqueNames(partner);
+  const names = spoutOutputNames(partner.name, partner.sources);
   const seen = new Set<string>();
   return enabled.flatMap((e) => {
     if (e.partnerSlug !== partner.slug) return [];
@@ -75,18 +75,4 @@ export function desiredOutputs(partner: Partner | null, enabled: SpoutOutputKey[
       },
     ];
   });
-}
-
-/** Sender name per source slug, numbered " (n)" where names (as truncated) collide. */
-function uniqueNames(partner: Partner): Map<string, string> {
-  const used = new Set<string>();
-  const names = new Map<string, string>();
-  for (const s of partner.sources) {
-    if (names.has(s.slug)) continue;
-    let name = spoutOutputName(partner.name, s.name);
-    for (let n = 2; used.has(name); n++) name = spoutOutputName(partner.name, s.name, ` (${n})`);
-    used.add(name);
-    names.set(s.slug, name);
-  }
-  return names;
 }

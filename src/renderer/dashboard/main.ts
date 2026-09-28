@@ -1,6 +1,6 @@
 import "../../shared/dashboard-api";
 import type { DashboardState, LocalSource } from "../../shared/dashboard-api";
-import { spoutOutputName } from "../../shared/spout-name";
+import { spoutOutputNames } from "../../shared/spout-name";
 import type { SourceInfo, SourceStatus } from "../../shared/protocol";
 import { h } from "./dom";
 import { PreviewPool } from "./previews";
@@ -160,7 +160,12 @@ function renderTabs(): HTMLElement {
   );
 }
 
-function partnerRow(partner: NonNullable<DashboardState["partner"]>, src: SourceInfo, keys: Set<string>): HTMLElement {
+function partnerRow(
+  partner: NonNullable<DashboardState["partner"]>,
+  src: SourceInfo,
+  spoutNames: Map<string, string>,
+  keys: Set<string>,
+): HTMLElement {
   const key = `${partner.slug}/${src.slug}`;
   const canWatch = watchable(src.status);
   if (canWatch) keys.add(key);
@@ -181,7 +186,7 @@ function partnerRow(partner: NonNullable<DashboardState["partner"]>, src: Source
         src.alpha ? h("span", { class: "tag alpha" }, "alpha") : null,
         `${src.width}×${src.height} · ${src.fps}fps · OBS size ${src.width}×${src.height}`,
       ),
-      spoutOn ? h("span", { class: "sub" }, `Spout sender: ${spoutOutputName(partner.name, src.name)}`) : null,
+      spoutOn ? h("span", { class: "sub" }, `Spout sender: ${spoutNames.get(src.slug) ?? ""}`) : null,
     ),
     h(
       "div",
@@ -203,6 +208,7 @@ function partnerRow(partner: NonNullable<DashboardState["partner"]>, src: Source
 }
 
 function renderPartner(partner: NonNullable<DashboardState["partner"]>, keys: Set<string>): HTMLElement {
+  const spoutNames = spoutOutputNames(partner.name, partner.sources);
   return h(
     "div",
     { class: "body" },
@@ -213,7 +219,7 @@ function renderPartner(partner: NonNullable<DashboardState["partner"]>, keys: Se
       h("button", { class: "btn-ghost danger", onclick: () => void api.kick() }, "Disconnect partner"),
     ),
     partner.sources.length === 0 ? h("div", { class: "empty" }, `${partner.name} hasn't added any sources yet.`) : null,
-    partner.sources.map((s) => partnerRow(partner, s, keys)),
+    partner.sources.map((s) => partnerRow(partner, s, spoutNames, keys)),
   );
 }
 

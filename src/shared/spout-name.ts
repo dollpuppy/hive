@@ -47,3 +47,24 @@ export function spoutOutputName(partnerName: string, sourceName: string, suffix 
   const base = `${OWN_OUTPUT_PREFIX}${partnerName} - ${sourceName}`;
   return truncateUtf8(base, MAX_SENDER_NAME_BYTES - byteLength(suffix)) + suffix;
 }
+
+/**
+ * Sender name per source slug, numbered " (n)" where names (as truncated) collide. Two sources
+ * with the same display name (different slugs) would compose the same sender name, which Spout
+ * can't hold twice: the second gets " (2)", the third " (3)", and so on, in `sources` order.
+ * Used by both `spout-output-plan.ts` (to pick each output's real sender name) and the dashboard
+ * renderer (to show the same name in a partner row, spec §10) — they must agree, so this lives
+ * in one place rather than being duplicated.
+ */
+export function spoutOutputNames(partnerName: string, sources: readonly { slug: string; name: string }[]): Map<string, string> {
+  const used = new Set<string>();
+  const names = new Map<string, string>();
+  for (const s of sources) {
+    if (names.has(s.slug)) continue;
+    let name = spoutOutputName(partnerName, s.name);
+    for (let n = 2; used.has(name); n++) name = spoutOutputName(partnerName, s.name, ` (${n})`);
+    used.add(name);
+    names.set(s.slug, name);
+  }
+  return names;
+}

@@ -5,6 +5,8 @@ interface Preview {
   el: HTMLDivElement;
   client: ViewerClient;
   stopLoop(): void;
+  /** Releases the WebGL context (if any) and detaches the stream. Only for a preview being discarded. */
+  dispose(): void;
 }
 
 /**
@@ -53,9 +55,11 @@ export class PreviewPool {
         video.srcObject = stream;
         void video.play().catch(() => undefined);
         stopLoop();
-        if (info.alpha) {
+        // Chromium caps concurrent WebGL contexts (~16); AlphaUnpacker's constructor can throw
+        // "WebGL unavailable" once that cap (or a driver limit) is hit. Fall back to the packed
+        // video as-is rather than losing the preview row entirely.
+        if (info.alpha && (unpacker ??= tryCreateUnpacker())) {
           video.className = "feeder";
-          unpacker ??= new AlphaUnpacker(canvas);
           el.replaceChildren(video, canvas);
           const tick = (): void => {
             try {
@@ -76,17 +80,34 @@ export class PreviewPool {
         el.replaceChildren();
       },
     });
+
+    function tryCreateUnpacker(): AlphaUnpacker | null {
+      try {
+        return new AlphaUnpacker(canvas);
+      } catch (err) {
+        console.error("[hive] AlphaUnpacker unavailable, showing the packed video without alpha", err);
+        return null;
+      }
+    }
+
+    const dispose = (): void => {
+      stopLoop();
+      unpacker?.dispose();
+      unpacker = null;
+      video.srcObject = null;
+    };
+
     if (!this.paused) client.start();
-    this.previews.set(key, { el, client, stopLoop });
+    this.previews.set(key, { el, client, stopLoop, dispose });
     return el;
   }
 
-  /** Stop previews that are no longer rendered. */
+  /** Stop and fully release previews that are no longer rendered (closes their WebGL context, if any). */
   retain(keys: ReadonlySet<string>): void {
     for (const [key, p] of [...this.previews]) {
       if (keys.has(key)) continue;
       p.client.stop();
-      p.stopLoop();
+      p.dispose();
       this.previews.delete(key);
     }
   }
