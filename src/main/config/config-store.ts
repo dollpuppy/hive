@@ -6,6 +6,10 @@ import { z } from "zod";
 export const presetSchema = z.enum(["low", "med", "high"]);
 export type Preset = z.infer<typeof presetSchema>;
 
+/** Largest render size a URL source can be configured with (and so the largest size Hive advertises). */
+export const URL_SOURCE_MAX_WIDTH = 3840;
+export const URL_SOURCE_MAX_HEIGHT = 2160;
+
 const sourceBase = {
   id: z.string().min(1).max(64),
   name: z.string().min(1).max(64),
@@ -21,8 +25,8 @@ export const sourceConfigSchema = z.discriminatedUnion("kind", [
     ...sourceBase,
     kind: z.literal("url"),
     url: z.string().url(),
-    width: z.number().int().positive().max(3840),
-    height: z.number().int().positive().max(2160),
+    width: z.number().int().positive().max(URL_SOURCE_MAX_WIDTH),
+    height: z.number().int().positive().max(URL_SOURCE_MAX_HEIGHT),
   }),
 ]);
 export type SourceConfig = z.infer<typeof sourceConfigSchema>;

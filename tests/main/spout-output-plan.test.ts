@@ -114,4 +114,30 @@ describe("spout output plan", () => {
     expect(out[1]?.name.endsWith(" (2)")).toBe(true);
     for (const o of out) expect(Buffer.byteLength(o.name, "utf8")).toBeLessThanOrEqual(255);
   });
+
+  describe("clamps partner-controlled sizes", () => {
+    const sized = (width: number, height: number, fps = 30) =>
+      desiredOutputs({ ...partner, sources: [{ ...partner.sources[0]!, width, height, fps }] }, [
+        { partnerSlug: "shady-penguinn", sourceSlug: "game" },
+      ])[0];
+
+    it("scales the protocol maximum down to Hive's largest advertisable size", () => {
+      expect(sized(7680, 4320, 240)).toMatchObject({ width: 3840, height: 2160, fps: 60 });
+    });
+
+    it("preserves the aspect ratio when only one dimension is too large", () => {
+      expect(sized(7680, 1080)).toMatchObject({ width: 3840, height: 540 });
+      expect(sized(1000, 4320)).toMatchObject({ width: 500, height: 2160 });
+    });
+
+    it("keeps both dimensions at least 16", () => {
+      expect(sized(4, 4)).toMatchObject({ width: 16, height: 16 });
+      expect(sized(7680, 2)).toMatchObject({ width: 3840, height: 16 });
+    });
+
+    it("leaves sizes and frame rates Hive can advertise unchanged", () => {
+      expect(sized(3840, 2160, 60)).toMatchObject({ width: 3840, height: 2160, fps: 60 });
+      expect(sized(1920, 1080, 30)).toMatchObject({ width: 1920, height: 1080, fps: 30 });
+    });
+  });
 });

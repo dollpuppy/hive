@@ -1,3 +1,5 @@
+import { PRESETS } from "../../shared/presets";
+import { URL_SOURCE_MAX_HEIGHT, URL_SOURCE_MAX_WIDTH } from "../config/config-store";
 import type { Partner } from "../hub/hub";
 
 /** Hive's own Spout outputs; hidden from the input picker to avoid feedback loops. */
@@ -8,6 +10,28 @@ export const OWN_OUTPUT_PREFIX = "Hive - ";
  * trailing NUL terminator, so the usable name is at most 255 bytes.
  */
 const MAX_SENDER_NAME_BYTES = 255;
+
+/**
+ * Bounds for partner-advertised sizes. The protocol accepts up to 7680×4320 @ 240 fps,
+ * and these values size a native Spout sender and an offscreen renderer, so they are
+ * clamped to the largest a Hive publisher can itself advertise: the URL-source size
+ * maxima (the preset table tops out below them) and the fastest preset.
+ */
+const MAX_OUTPUT_WIDTH = Math.max(URL_SOURCE_MAX_WIDTH, ...Object.values(PRESETS).map((p) => p.width));
+const MAX_OUTPUT_HEIGHT = Math.max(URL_SOURCE_MAX_HEIGHT, ...Object.values(PRESETS).map((p) => p.height));
+const MAX_OUTPUT_FPS = Math.max(...Object.values(PRESETS).map((p) => p.fps));
+const MIN_OUTPUT_DIMENSION = 16;
+
+/**
+ * Scales `width`×`height` down (never up) to fit the output bounds, preserving the
+ * aspect ratio, then keeps each dimension an integer of at least 16.
+ */
+function clampSize(width: number, height: number): { width: number; height: number } {
+  const scale = Math.min(1, MAX_OUTPUT_WIDTH / width, MAX_OUTPUT_HEIGHT / height);
+  const fit = (value: number, max: number): number =>
+    Math.min(max, Math.max(MIN_OUTPUT_DIMENSION, Math.round(value * scale)));
+  return { width: fit(width, MAX_OUTPUT_WIDTH), height: fit(height, MAX_OUTPUT_HEIGHT) };
+}
 
 export interface SpoutOutputKey {
   partnerSlug: string;
@@ -58,7 +82,8 @@ export function spoutOutputName(partnerName: string, sourceName: string, suffix 
  * display name (different slugs) would compose the same sender name, which Spout
  * can't hold twice: the second gets " (2)", the third " (3)", and so on, in the
  * partner's source-list order (not `enabled` order), so a source's name doesn't
- * depend on which outputs are turned on.
+ * depend on which outputs are turned on. Sizes and frame rates are clamped (see
+ * `clampSize`), since they are partner-controlled.
  */
 export function desiredOutputs(partner: Partner | null, enabled: SpoutOutputKey[]): DesiredOutput[] {
   if (!partner) return [];
@@ -76,9 +101,8 @@ export function desiredOutputs(partner: Partner | null, enabled: SpoutOutputKey[
         key,
         name: names.get(source.slug) ?? spoutOutputName(partner.name, source.name),
         path: `/s/${encodeURIComponent(partner.slug)}/${encodeURIComponent(source.slug)}`,
-        width: source.width,
-        height: source.height,
-        fps: source.fps,
+        ...clampSize(source.width, source.height),
+        fps: Math.min(source.fps, MAX_OUTPUT_FPS),
       },
     ];
   });
