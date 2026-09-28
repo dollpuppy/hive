@@ -1,7 +1,8 @@
 import { join } from "node:path";
-import { BrowserWindow } from "electron";
+import { BrowserWindow, screen } from "electron";
 import type { HiveConfig } from "./config/config-store";
 import { rendererDevUrl } from "./publisher-window";
+import { fitSavedBounds } from "./window-bounds";
 
 /** Prefix the local server serves the built renderer directory at (see app-core). */
 export const DASHBOARD_UI_PREFIX = "/ui/";
@@ -19,11 +20,18 @@ export function dashboardUrl(port: number): string {
 const stripHash = (url: string): string => url.split("#")[0]!;
 
 export function createDashboardWindow(opts: { url: string; bounds: HiveConfig["windowBounds"] }): BrowserWindow {
-  const { bounds } = opts;
+  // Saved bounds may be on a display that's gone: then it centers, sized to fit the primary one.
+  const bounds = opts.bounds
+    ? fitSavedBounds(
+        opts.bounds,
+        screen.getAllDisplays().map((d) => d.workArea),
+        screen.getPrimaryDisplay().workArea,
+      )
+    : null;
   const win = new BrowserWindow({
     width: bounds?.width ?? 980,
     height: bounds?.height ?? 680,
-    ...(bounds ? { x: bounds.x, y: bounds.y } : {}),
+    ...(bounds?.x !== undefined && bounds.y !== undefined ? { x: bounds.x, y: bounds.y } : {}),
     minWidth: 760,
     minHeight: 520,
     title: "Hive",
