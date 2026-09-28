@@ -34,45 +34,78 @@ function requireSize(value: number, what: string, max: number): number {
 let configuredSession: Session | null = null;
 
 /**
- * Loopback host:port pairs that are currently allowed to be requested, one entry
- * per currently-open source whose own configured URL is itself loopback (keyed by
- * sourceId so a close() or a reopen with a different URL can revoke just that
- * source's entry without disturbing anyone else's). All URL sources share a single
+ * Loopback allowance per currently-open source whose own configured URL is itself
+ * loopback, keyed by sourceId so a close() or a reopen with a different URL can revoke
+ * just that source's entry without disturbing anyone else's. `webContentsId` attributes
+ * an incoming request back to the one source that opened it (Electron's
+ * `OnBeforeRequestListenerDetails.webContentsId` names the requesting webContents), so
+ * source B (a remote, possibly hostile page) can never ride source A's allowance to
+ * reach A's loopback target — only A's own window can. All URL sources share a single
  * session (URL_SOURCES_PARTITION), so this registry backs a single onBeforeRequest
  * listener registered once for that session — Electron keeps only the most recently
  * registered listener per event per session, so per-source registration would silently
  * clobber earlier sources' listeners instead of composing with them.
  */
-const loopbackAllow = new Map<string, string>();
+const loopbackAllow = new Map<string, { webContentsId: number; target: string }>();
 
-/** Strips IPv6 brackets and lowercases, so host comparisons are case-insensitive. */
+/** Strips IPv6 brackets, a trailing root "." (DNS-legal, `localhost.` bypasses a naive match), and lowercases. */
 function normalizeHost(hostname: string): string {
-  const h = hostname.toLowerCase();
-  return h.startsWith("[") && h.endsWith("]") ? h.slice(1, -1) : h;
+  let h = hostname.toLowerCase();
+  if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1);
+  if (h.endsWith(".")) h = h.slice(0, -1);
+  return h;
 }
 
-/** 127.0.0.0/8, localhost, *.localhost, and the IPv6 loopback address. */
+function isIPv4Loopback(host: string): boolean {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (m === null || !m.slice(1).every((o) => Number(o) <= 255)) return false;
+  return m[1] === "127" || host === "0.0.0.0";
+}
+
+/**
+ * If `host` is an IPv6 address with an embedded IPv4 address (the `::ffff:a.b.c.d`
+ * mapped form, either as a dotted quad or — what `new URL()` actually normalizes it
+ * to — two hex groups, e.g. `::ffff:7f00:1` for 127.0.0.1), returns that IPv4 address
+ * in dotted-quad form; otherwise null.
+ */
+function ipv4MappedAddress(host: string): string | null {
+  const m = /^::ffff:(?:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/.exec(host);
+  if (m === null) return null;
+  if (m[1]) return m[1];
+  const hi = Number.parseInt(m[2]!, 16);
+  const lo = Number.parseInt(m[3]!, 16);
+  return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff].join(".");
+}
+
+/** 127.0.0.0/8, 0.0.0.0, localhost, *.localhost, the IPv6 loopback address, and any IPv4-mapped form of the above. */
 function isLoopbackHost(host: string): boolean {
   if (host === "localhost" || host.endsWith(".localhost") || host === "::1") return true;
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  return m !== null && m.slice(1).every((o) => Number(o) <= 255) && m[1] === "127";
+  if (isIPv4Loopback(host)) return true;
+  const mapped = ipv4MappedAddress(host);
+  return mapped !== null && isIPv4Loopback(mapped);
 }
 
 const DEFAULT_PORT: Record<string, string> = { "http:": "80", "https:": "443" };
 
-/** Normalized "host:port" for a URL, filling in the scheme's default port when absent. */
+/**
+ * Normalized "host:port" for a URL, filling in the scheme's default port when absent.
+ * An IPv4-mapped IPv6 host is folded to its plain IPv4 form, so a source's own URL and
+ * an incoming request that name the same address in different notations still match.
+ */
 function hostPort(u: URL): string {
-  return `${normalizeHost(u.hostname)}:${u.port || (DEFAULT_PORT[u.protocol] ?? "")}`;
+  const host = normalizeHost(u.hostname);
+  return `${ipv4MappedAddress(host) ?? host}:${u.port || (DEFAULT_PORT[u.protocol] ?? "")}`;
 }
 
 /**
  * Records or clears sourceId's loopback allowance from its configured URL: an http(s)
  * source that itself points at a loopback host may only ever reach that one host:port,
- * even though the session it renders in is shared with every other URL source.
+ * from that source's own window — even though the session it renders in is shared with
+ * every other URL source.
  */
-function setLoopbackAllowance(sourceId: string, url: string): void {
+function setLoopbackAllowance(sourceId: string, url: string, webContentsId: number): void {
   const u = new URL(url); // caller already validated this is a well-formed http(s) URL
-  if (isLoopbackHost(normalizeHost(u.hostname))) loopbackAllow.set(sourceId, hostPort(u));
+  if (isLoopbackHost(normalizeHost(u.hostname))) loopbackAllow.set(sourceId, { webContentsId, target: hostPort(u) });
   else loopbackAllow.delete(sourceId);
 }
 
@@ -97,10 +130,12 @@ function urlSourcesSession(): Session {
   ses.on("will-download", (_event, item) => item.cancel());
   // Blocks every loopback request from every URL source (the whole session's traffic,
   // since Electron only keeps the last-registered onBeforeRequest listener per session)
-  // unless it targets the exact host:port of some currently-open source's own loopback
-  // URL. Without this, a malicious or compromised remote page loaded as a URL source
-  // could probe or attack services on the user's own machine (other Hive ports, other
-  // localhost apps) using the renderer's network stack.
+  // unless it targets the exact host:port of the *requesting* source's own loopback URL
+  // (attributed via webContentsId — see loopbackAllow's doc comment). Without this, a
+  // malicious or compromised remote page loaded as a URL source could probe or attack
+  // services on the user's own machine (other Hive ports, other localhost apps) using
+  // the renderer's network stack — either its own, or another source's if allowance
+  // were not scoped per-window.
   ses.webRequest.onBeforeRequest((details, callback) => {
     let u: URL;
     try {
@@ -114,8 +149,8 @@ function urlSourcesSession(): Session {
       return;
     }
     const target = hostPort(u);
-    const allowed = [...loopbackAllow.values()].includes(target);
-    callback({ cancel: !allowed });
+    const owner = [...loopbackAllow.values()].find((a) => a.webContentsId === details.webContentsId);
+    callback({ cancel: owner?.target !== target });
   });
   configuredSession = ses;
   return ses;
@@ -162,7 +197,6 @@ export class UrlSources extends EventEmitter {
     requireSize(height, "height", MAX_DIMENSION);
     requireSize(fps, "fps", MAX_FPS);
     this.close(sourceId);
-    setLoopbackAllowance(sourceId, url);
 
     const win = new BrowserWindow({
       show: false,
@@ -183,6 +217,7 @@ export class UrlSources extends EventEmitter {
     const entry: UrlSource = { handle: this.nextHandle++, win, drops: 0, retryTimer: null, failures: [] };
     this.sources.set(sourceId, entry); // registered first so close() can always reach the window
     const wc = win.webContents;
+    setLoopbackAllowance(sourceId, url, wc.id);
     const isCurrent = (): boolean => this.sources.get(sourceId) === entry;
 
     wc.setWindowOpenHandler(() => ({ action: "deny" }));

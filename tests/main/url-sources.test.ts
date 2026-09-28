@@ -28,7 +28,9 @@ vi.mock("electron", async () => {
     onBeforeRequest: (fn: unknown) => h.session.onBeforeRequest.push(fn),
   };
 
+  let nextWebContentsId = 1;
   class FakeWebContents extends EE {
+    readonly id = nextWebContentsId++;
     windowOpenHandler: (() => unknown) | null = null;
     audioMuted = false;
     frameRate = 0;
@@ -86,6 +88,7 @@ vi.mock("@napolab/texture-bridge-core/electron", () => ({
 import { URL_SOURCES_PARTITION, UrlSources } from "../../src/main/url-sources";
 
 interface FakeWebContents extends EventEmitter {
+  readonly id: number;
   windowOpenHandler: (() => unknown) | null;
   audioMuted: boolean;
   frameRate: number;
@@ -498,13 +501,16 @@ describe("UrlSources", () => {
     // The session's onBeforeRequest listener is registered once, the first time any test
     // in this file opens a source (see the "configures the session once" test above);
     // it is shared by every source ever opened against this module's singleton session.
-    function fire(url: string): { cancel?: boolean } {
+    // `webContentsId` attributes the request to the source whose window it came from
+    // (Electron fills this in from the requesting webContents); omitting it simulates a
+    // request electron couldn't attribute to any window.
+    function fire(url: string, webContentsId?: number): { cancel?: boolean } {
       const listener = h.session.onBeforeRequest[0] as (
-        details: { url: string },
+        details: { url: string; webContentsId?: number },
         cb: (r: { cancel?: boolean }) => void,
       ) => void;
       let result: { cancel?: boolean } | undefined;
-      listener({ url }, (r) => (result = r));
+      listener({ url, webContentsId }, (r) => (result = r));
       return result!;
     }
 
@@ -513,65 +519,121 @@ describe("UrlSources", () => {
       expect(h.session.onBeforeRequest).toHaveLength(1);
     });
 
-    it("allows requests to non-loopback hosts", () => {
+    it("allows requests to non-loopback hosts regardless of attribution", () => {
       sources.open("s1", "https://a.test", 100, 100, 30);
       expect(fire("https://cdn.example.com/img.png").cancel).not.toBe(true);
-      expect(fire("https://a.test/page").cancel).not.toBe(true);
+      expect(fire("https://a.test/page", win(0).webContents.id).cancel).not.toBe(true);
     });
 
     it("cancels loopback requests when no open source targets that host:port", () => {
       sources.open("s1", "https://a.test", 100, 100, 30);
+      const id = win(0).webContents.id;
       for (const url of ["http://127.0.0.1:9222/x", "http://localhost:3000/x", "http://[::1]:9/x", "http://sub.localhost/x"]) {
-        expect(fire(url).cancel).toBe(true);
+        expect(fire(url, id).cancel).toBe(true);
       }
     });
 
-    it("allows loopback requests to a source's own loopback URL, on that host:port only", () => {
+    it("allows loopback requests from a source's own window to its own loopback URL, on that host:port only", () => {
       sources.open("s1", "http://127.0.0.1:7000/page", 100, 100, 30);
-      expect(fire("http://127.0.0.1:7000/asset.js").cancel).not.toBe(true);
+      const id = win(0).webContents.id;
+      expect(fire("http://127.0.0.1:7000/asset.js", id).cancel).not.toBe(true);
       // Different port on the same loopback host is still blocked.
-      expect(fire("http://127.0.0.1:9999/x").cancel).toBe(true);
+      expect(fire("http://127.0.0.1:9999/x", id).cancel).toBe(true);
       // A different loopback host is still blocked.
-      expect(fire("http://localhost:7000/x").cancel).toBe(true);
+      expect(fire("http://localhost:7000/x", id).cancel).toBe(true);
+    });
+
+    it("blocks a second source's window from reaching the first source's own loopback allowance", () => {
+      sources.open("s1", "http://127.0.0.1:7000/page", 100, 100, 30);
+      sources.open("s2", "https://remote.test/evil", 100, 100, 30);
+      const s2Id = win(1).webContents.id;
+      // s2 is a remote page; it must not be able to ride s1's allowance to reach s1's target.
+      expect(fire("http://127.0.0.1:7000/x", s2Id).cancel).toBe(true);
+    });
+
+    it("blocks requests with no attributable window even when their host:port matches an open allowance", () => {
+      sources.open("s1", "http://127.0.0.1:7000/page", 100, 100, 30);
+      expect(fire("http://127.0.0.1:7000/x").cancel).toBe(true);
     });
 
     it("matches hostnames case-insensitively", () => {
       sources.open("s1", "http://LocalHost:7000/page", 100, 100, 30);
-      expect(fire("http://localhost:7000/x").cancel).not.toBe(true);
-      expect(fire("HTTP://LOCALHOST:7000/x").cancel).not.toBe(true);
+      const id = win(0).webContents.id;
+      expect(fire("http://localhost:7000/x", id).cancel).not.toBe(true);
+      expect(fire("HTTP://LOCALHOST:7000/x", id).cancel).not.toBe(true);
+    });
+
+    it("strips a trailing root dot before comparing hostnames", () => {
+      sources.open("s1", "https://a.test", 100, 100, 30);
+      const id = win(0).webContents.id;
+      // Default-deny cases: the trailing dot must not let these slip past the loopback check.
+      expect(fire("http://localhost./x", id).cancel).toBe(true);
+      expect(fire("http://sub.localhost./x", id).cancel).toBe(true);
+      expect(fire("http://127.0.0.1./x", id).cancel).toBe(true);
+      sources.open("s2", "http://localhost:7000/page", 100, 100, 30);
+      const s2Id = win(1).webContents.id;
+      // A trailing dot on the *request* must still match an allowance recorded without one.
+      expect(fire("http://localhost.:7000/x", s2Id).cancel).not.toBe(true);
+    });
+
+    it("treats 0.0.0.0 as loopback", () => {
+      sources.open("s1", "https://a.test", 100, 100, 30);
+      expect(fire("http://0.0.0.0:80/x", win(0).webContents.id).cancel).toBe(true);
+    });
+
+    it("recognizes IPv4-mapped IPv6 addresses as loopback, in both hex and dotted-quad form", () => {
+      sources.open("s1", "https://a.test", 100, 100, 30);
+      const id = win(0).webContents.id;
+      // ::ffff:127.0.0.1 normalizes to this hex form when parsed by `new URL()`.
+      expect(fire("http://[::ffff:7f00:1]/x", id).cancel).toBe(true);
+      expect(fire("http://[::ffff:127.0.0.1]/x", id).cancel).toBe(true);
+      // The mapped form of 0.0.0.0 is loopback too.
+      expect(fire("http://[::ffff:0:0]/x", id).cancel).toBe(true);
+    });
+
+    it("allows a source whose own URL uses the IPv4-mapped IPv6 form to reach that same target", () => {
+      sources.open("s1", "http://[::ffff:127.0.0.1]:7000/page", 100, 100, 30);
+      const id = win(0).webContents.id;
+      expect(fire("http://127.0.0.1:7000/x", id).cancel).not.toBe(true);
+      expect(fire("http://[::ffff:7f00:1]:7000/x", id).cancel).not.toBe(true);
     });
 
     it("falls back to the protocol's default port when none is given", () => {
       sources.open("s1", "http://127.0.0.1/page", 100, 100, 30);
-      expect(fire("http://127.0.0.1/asset.js").cancel).not.toBe(true);
-      expect(fire("http://127.0.0.1:80/asset.js").cancel).not.toBe(true);
-      expect(fire("http://127.0.0.1:81/asset.js").cancel).toBe(true);
+      const id = win(0).webContents.id;
+      expect(fire("http://127.0.0.1/asset.js", id).cancel).not.toBe(true);
+      expect(fire("http://127.0.0.1:80/asset.js", id).cancel).not.toBe(true);
+      expect(fire("http://127.0.0.1:81/asset.js", id).cancel).toBe(true);
     });
 
     it("revokes the allowance once the source is closed", () => {
       sources.open("s1", "http://127.0.0.1:7000/page", 100, 100, 30);
-      expect(fire("http://127.0.0.1:7000/x").cancel).not.toBe(true);
+      const id = win(0).webContents.id;
+      expect(fire("http://127.0.0.1:7000/x", id).cancel).not.toBe(true);
       sources.close("s1");
-      expect(fire("http://127.0.0.1:7000/x").cancel).toBe(true);
+      expect(fire("http://127.0.0.1:7000/x", id).cancel).toBe(true);
     });
 
     it("keeps another source's allowance when one loopback source closes", () => {
       sources.open("s1", "http://127.0.0.1:7000/page", 100, 100, 30);
       sources.open("s2", "http://127.0.0.1:7001/page", 100, 100, 30);
+      const s1Id = win(0).webContents.id;
+      const s2Id = win(1).webContents.id;
       sources.close("s1");
-      expect(fire("http://127.0.0.1:7001/x").cancel).not.toBe(true);
-      expect(fire("http://127.0.0.1:7000/x").cancel).toBe(true);
+      expect(fire("http://127.0.0.1:7001/x", s2Id).cancel).not.toBe(true);
+      expect(fire("http://127.0.0.1:7000/x", s1Id).cancel).toBe(true);
     });
 
     it("re-opening a source with a non-loopback URL revokes its earlier loopback allowance", () => {
       sources.open("s1", "http://127.0.0.1:7000/page", 100, 100, 30);
       sources.open("s1", "https://a.test", 100, 100, 30);
-      expect(fire("http://127.0.0.1:7000/x").cancel).toBe(true);
+      const id = win(1).webContents.id; // the re-open replaced the window
+      expect(fire("http://127.0.0.1:7000/x", id).cancel).toBe(true);
     });
 
     it("cancels requests it cannot parse as a URL", () => {
       sources.open("s1", "https://a.test", 100, 100, 30);
-      expect(fire("not a url").cancel).toBe(true);
+      expect(fire("not a url", win(0).webContents.id).cancel).toBe(true);
     });
   });
 });
