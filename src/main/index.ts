@@ -47,22 +47,26 @@ function run(): void {
   let shutdownStarted = false;
   let shutdownDone = false;
 
-  // A deep link (or `--join=`, for development) on the command line joins once started.
-  const devJoin = process.argv.find((a) => a.startsWith("--join="))?.slice("--join=".length) || null;
-  let pendingInvite = inviteFromArgv(process.argv) ?? devJoin;
+  // A deep link on the command line is offered once started — never joined without the user
+  // confirming (a web page can launch hive:// links). `--join=` auto-joins, but only in
+  // development (unpackaged) builds.
+  const devJoin = app.isPackaged
+    ? null
+    : process.argv.find((a) => a.startsWith("--join="))?.slice("--join=".length) || null;
+  let pendingOffer = inviteFromArgv(process.argv);
 
   // Deep links while running: Windows starts a second instance with the link in argv; it
-  // exits (no lock) and we get its argv. The link is validated by the joiner.
+  // exits (no lock) and we get its argv. Offered to the user, who confirms or dismisses.
   app.on("second-instance", (_event, argv) => {
     if (shutdownStarted) return;
     const invite = inviteFromArgv(argv);
     if (!core) {
       // Still starting: the latest link wins once started.
-      if (invite) pendingInvite = invite;
+      if (invite) pendingOffer = invite;
       return;
     }
     core.focus();
-    if (invite) core.session.join(invite);
+    if (invite) core.session.offerInvite(invite);
   });
 
   app.on("before-quit", (e) => {
@@ -90,8 +94,14 @@ function run(): void {
     .then(async () => {
       startup = startAppCore();
       core = await startup;
-      if (pendingInvite && !shutdownStarted) core.session.join(pendingInvite);
-      pendingInvite = null;
+      if (!shutdownStarted) {
+        if (pendingOffer) {
+          core.session.offerInvite(pendingOffer);
+          core.focus();
+        }
+        if (devJoin) core.session.join(devJoin);
+      }
+      pendingOffer = null;
     })
     .catch((err: unknown) => {
       console.error("[hive] startup failed:", err);

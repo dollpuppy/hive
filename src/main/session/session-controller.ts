@@ -59,6 +59,13 @@ export class SessionController extends EventEmitter {
    * Hub's own getter having already been updated by the time `leave()` runs.
    */
   private hasPartner = false;
+  /**
+   * Spec §10: the last partner, kept through the Spout grace window after a plain disconnect so
+   * the dashboard can grey it out ("reconnecting…") and Spout syncs keep its outputs. Null once
+   * the grace ends, on kick/kicked, leave(), or stopServer() with an inbound partner.
+   */
+  private partner: Partner | null = null;
+  private pendingInvite: string | null = null;
 
   constructor(private readonly deps: SessionDeps) {
     super();
@@ -115,7 +122,7 @@ export class SessionController extends EventEmitter {
   state(): DashboardState {
     const statuses = new Map<string, SourceStatus>(this.deps.hub.sources.map((s) => [s.id, s.status]));
     const tunnel = this.deps.tunnel.state;
-    const partner = this.deps.hub.partner;
+    const partner = this.partner;
     return {
       displayName: this.cfg.displayName,
       port: this.deps.port,
@@ -124,7 +131,10 @@ export class SessionController extends EventEmitter {
         inviteLink: tunnel.status === "up" && this.secret ? buildInviteLink(tunnel.url, this.secret) : null,
       },
       join: { ...this.joinState },
-      partner: partner ? { name: partner.name, slug: partner.slug, sources: partner.sources } : null,
+      partner: partner
+        ? { name: partner.name, slug: partner.slug, sources: partner.sources, connected: this.hasPartner }
+        : null,
+      pendingInvite: this.pendingInvite,
       sources: this.cfg.sources.map((s) => ({ ...s, status: statuses.get(s.id) ?? "idle" })),
       watchers: this.deps.hub.watcherCounts(),
       spoutOut: this.cfg.spoutOut,
@@ -149,6 +159,15 @@ export class SessionController extends EventEmitter {
   }
 
   stopServer(): void {
+    // Final fix 4: stopping the server with a partner who joined *us* is a deliberate disconnect
+    // (like leave()): no 60 s grace. A partner we joined (an active join handle) lives on their
+    // server, so it's untouched.
+    if (this.joinHandle === null && this.partner !== null) {
+      // hub.kick() emits `kicked-partner` then `partner: null` (flushing via onPartnerChanged);
+      // a partner only kept in the grace window has no link (kick() is a no-op): flush it here.
+      this.deps.hub.kick("server stopped");
+      if (this.partner !== null) this.flushPartner();
+    }
     this.deps.tunnel.stop();
     this.secret = null;
     this.lastTunnelUrl = null;
@@ -159,6 +178,19 @@ export class SessionController extends EventEmitter {
   // ------------------------------------------------------------------- join
 
   join(link: string): void {
+    this.pendingInvite = null;
+    // Final fix 2: one partner at a time. Never tear down the existing link to try another.
+    if (this.hasPartner) {
+      if (this.joinHandle !== null) {
+        // We joined them: joinState is our live "connected"; keep it (the dashboard's Leave
+        // button depends on it) and reject the call instead.
+        this.changed();
+        throw new Error("You're already connected to a partner.");
+      }
+      this.joinState = { status: "failed", detail: "already-partnered" };
+      this.changed();
+      return;
+    }
     this.stopJoin();
     this.joinState = { status: "connecting", detail: null };
     let handle: JoinHandle | null = null;
@@ -189,9 +221,7 @@ export class SessionController extends EventEmitter {
     if (this.hasPartner) {
       this.kickOrLeavePending = true;
     } else {
-      this.kickOrLeavePending = false;
-      this.clearSpoutGrace();
-      this.deps.syncSpoutOutputs(null, this.cfg.spoutOut);
+      this.flushPartner();
     }
     this.changed();
   }
@@ -237,7 +267,9 @@ export class SessionController extends EventEmitter {
     this.cfg = config;
     // Amendment 5: turning a toggle back on clears its previous inline error.
     if (enabled) this.spoutOutErrors.delete(`${partnerSlug}/${sourceSlug}`);
-    this.deps.syncSpoutOutputs(this.deps.hub.partner, this.cfg.spoutOut);
+    // The kept partner during a grace window, so a toggle (or an error revert) doesn't tear down
+    // the partner's other outputs.
+    this.deps.syncSpoutOutputs(this.partner, this.cfg.spoutOut);
     this.changed();
     await this.deps.saveConfig(config);
   }
@@ -269,6 +301,17 @@ export class SessionController extends EventEmitter {
     this.deps.hub.setDisplayName(displayName);
     this.changed();
     await this.deps.saveConfig(config);
+  }
+
+  /** Final fix 1: a deep link only offers its invite; the user confirms (join) or dismisses. */
+  offerInvite(link: string): void {
+    this.pendingInvite = link;
+    this.changed();
+  }
+
+  dismissInvite(): void {
+    this.pendingInvite = null;
+    this.changed();
   }
 
   dismissBanner(id: BannerId): void {
@@ -305,15 +348,14 @@ export class SessionController extends EventEmitter {
   private onPartnerChanged(partner: Partner | null): void {
     this.hasPartner = partner !== null;
     if (partner) {
+      this.partner = partner;
       this.clearSpoutGrace();
       this.deps.syncSpoutOutputs(partner, this.cfg.spoutOut);
       this.changed();
       return;
     }
     if (this.kickOrLeavePending) {
-      this.kickOrLeavePending = false;
-      this.clearSpoutGrace();
-      this.deps.syncSpoutOutputs(null, this.cfg.spoutOut);
+      this.flushPartner();
       this.changed();
       return;
     }
@@ -326,9 +368,18 @@ export class SessionController extends EventEmitter {
     if (this.spoutGraceTimer || this.disposed) return;
     this.spoutGraceTimer = setTimeout(() => {
       this.spoutGraceTimer = null;
+      this.partner = null;
       this.deps.syncSpoutOutputs(null, this.cfg.spoutOut);
       this.changed();
     }, this.spoutGraceMs);
+  }
+
+  /** Drops the (live or kept) partner now: no grace, Spout outputs torn down. Caller emits. */
+  private flushPartner(): void {
+    this.kickOrLeavePending = false;
+    this.partner = null;
+    this.clearSpoutGrace();
+    this.deps.syncSpoutOutputs(null, this.cfg.spoutOut);
   }
 
   private clearSpoutGrace(): void {

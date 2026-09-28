@@ -16,7 +16,9 @@ const baseState: DashboardState = {
     name: "Shady Penguinn",
     slug: "shady-penguinn",
     sources: [{ id: "a", name: "Game", slug: "game", kind: "window", alpha: false, width: 1920, height: 1080, fps: 30, status: "live" }],
+    connected: true,
   },
+  pendingInvite: null,
   sources: [],
   watchers: {},
   spoutOut: [],
@@ -37,6 +39,7 @@ const mock = (state: DashboardState): string => `
     kick: rec("kick"), addSource: rec("addSource"), updateSource: rec("updateSource"), removeSource: rec("removeSource"),
     retrySource: rec("retrySource"),
     setSpoutOut: rec("setSpoutOut"), updateSettings: rec("updateSettings"), dismissBanner: rec("dismissBanner"),
+    dismissInvite: rec("dismissInvite"),
     listWindows: () => Promise.resolve([{ title: "melonDS", thumbnail: "data:image/gif;base64,R0lGODlhAQABAAAAACw=" }]),
     listSpoutSenders: () => Promise.resolve(["VSeeFace"]),
     copy: rec("copy"),
@@ -68,6 +71,8 @@ async function open(state: DashboardState = baseState): Promise<Page> {
 }
 
 const calls = (page: Page) => page.evaluate(() => (window as unknown as { __calls: unknown[][] }).__calls);
+const push = (page: Page, s: DashboardState) =>
+  page.evaluate((x) => (window as unknown as { __push: (x: unknown) => void }).__push(x), s);
 
 describe("dashboard", () => {
   it("opens on the partner tab and copies a source URL", async () => {
@@ -154,6 +159,70 @@ describe("dashboard", () => {
     const page = await open(state);
     await page.getByRole("button", { name: "Retry" }).click();
     expect(await calls(page)).toContainEqual(["retrySource", "src-1"]);
+    await page.close();
+  });
+
+  it("offers a deep-link invite: prefills the box, asks, and joins only on Join", async () => {
+    const page = await open();
+    const link = "https://c.trycloudflare.com/join#Z";
+    await push(page, { ...baseState, pendingInvite: link });
+    const prompt = page.getByRole("status", { name: "Invite" });
+    await prompt.getByText("Join c.trycloudflare.com?").waitFor();
+    expect(await page.getByRole("textbox", { name: "Partner's invite link" }).inputValue()).toBe(link);
+    expect((await calls(page)).some((c) => c[0] === "join")).toBe(false);
+    await prompt.getByRole("button", { name: "Join" }).click();
+    expect(await calls(page)).toContainEqual(["join", link]);
+    await page.close();
+  });
+
+  it("an invalid offered invite says so and can be dismissed", async () => {
+    const page = await open();
+    await push(page, { ...baseState, pendingInvite: "https://c.trycloudflare.com/nope" });
+    const prompt = page.getByRole("status", { name: "Invite" });
+    await prompt.getByText("That invite link isn't valid.").waitFor();
+    expect(await prompt.getByRole("button", { name: "Join" }).count()).toBe(0);
+    await prompt.getByRole("button", { name: "Dismiss" }).click();
+    expect(await calls(page)).toContainEqual(["dismissInvite"]);
+    await push(page, { ...baseState, pendingInvite: null });
+    expect(await prompt.count()).toBe(0);
+    await page.close();
+  });
+
+  it("greys out a partner kept through the grace window; Copy URL still works; no preview", async () => {
+    const kept = { ...baseState, partner: { ...baseState.partner!, connected: false } };
+    const page = await browser.newPage();
+    const sockets: string[] = [];
+    page.on("websocket", (ws) => sockets.push(ws.url()));
+    await page.addInitScript({ content: mock(kept) });
+    await page.goto(`http://127.0.0.1:${server.port}/dash/index.html`);
+    await page.getByText("Shady Penguinn — reconnecting…").waitFor();
+    const tab = page.getByRole("tab", { name: /Shady Penguinn/ });
+    expect(await tab.getAttribute("class")).toContain("disconnected");
+    expect(await tab.getAttribute("aria-selected")).toBe("true");
+    expect(await page.locator(".row.disconnected").count()).toBe(1);
+    // No preview subscriber for a partner that isn't connected...
+    await page.waitForTimeout(300);
+    expect(sockets.filter((u) => u.includes("/local/viewer"))).toEqual([]);
+    expect(await page.getByRole("button", { name: "Disconnect partner" }).count()).toBe(0);
+    await page.getByRole("button", { name: "Copy URL" }).click();
+    expect(await calls(page)).toContainEqual(["copy", "http://localhost:7421/s/shady-penguinn/game"]);
+    // ...and the preview starts once the partner is back.
+    const viewer = page.waitForEvent("websocket", (ws) => ws.url().includes("/local/viewer"));
+    await push(page, baseState);
+    await viewer;
+    await page.close();
+  });
+
+  it("switches to the partner tab on first connect only, not on a reconnect", async () => {
+    const page = await open({ ...baseState, partner: null });
+    await push(page, baseState);
+    const partnerTab = page.getByRole("tab", { name: /Shady Penguinn/ });
+    await expect(partnerTab.getAttribute("aria-selected")).resolves.toBe("true");
+    await page.getByRole("tab", { name: /My sources/ }).click();
+    await push(page, { ...baseState, partner: { ...baseState.partner!, connected: false } });
+    await push(page, baseState);
+    expect(await partnerTab.getAttribute("aria-selected")).toBe("false");
+    expect(await partnerTab.getAttribute("class")).not.toContain("disconnected");
     await page.close();
   });
 });

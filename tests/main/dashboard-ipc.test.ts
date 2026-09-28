@@ -52,6 +52,7 @@ beforeEach(() => {
     setSpoutOut: vi.fn(async () => undefined),
     updateSettings: vi.fn(async () => undefined),
     dismissBanner: vi.fn(),
+    dismissInvite: vi.fn(),
   };
   listWindows = vi.fn(async () => [{ title: "Game", thumbnail: "data:," }]);
   listSpoutSenders = vi.fn(() => ["Cam"]);
@@ -80,6 +81,7 @@ const CHANNELS: [string, unknown[]][] = [
   ["hive:dash:set-spout-out", ["bo", "game", true]],
   ["hive:dash:update-settings", [SETTINGS]],
   ["hive:dash:dismiss-banner", ["p2p-failed"]],
+  ["hive:dash:dismiss-invite", []],
   ["hive:dash:list-windows", []],
   ["hive:dash:list-spout-senders", []],
   ["hive:dash:copy", ["hello"]],
@@ -114,6 +116,8 @@ describe("registerDashboardIpc", () => {
     expect(session.updateSettings).toHaveBeenCalled();
     call("hive:dash:dismiss-banner", DASHBOARD, "publisher-down");
     expect(session.dismissBanner).toHaveBeenCalledWith("publisher-down");
+    call("hive:dash:dismiss-invite", DASHBOARD);
+    expect(session.dismissInvite).toHaveBeenCalledWith();
     await expect(call("hive:dash:list-windows", DASHBOARD)).resolves.toEqual([{ title: "Game", thumbnail: "data:," }]);
     expect(call("hive:dash:list-spout-senders", DASHBOARD)).toEqual(["Cam"]);
     call("hive:dash:copy", DASHBOARD, "");
@@ -182,6 +186,7 @@ describe("dashboard preload", () => {
     await api.setSpoutOut("bo", "game", true);
     await api.updateSettings(SETTINGS);
     await api.dismissBanner("p2p-failed");
+    await api.dismissInvite();
     await api.listWindows();
     await api.listSpoutSenders();
     await api.copy("x");

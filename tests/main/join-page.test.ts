@@ -36,4 +36,10 @@ describe("inviteFromArgv", () => {
     expect(inviteFromArgv(["Hive.exe", "--profile=a"])).toBeNull();
     expect(inviteFromArgv(["Hive.exe", "hive://join"])).toBeNull();
   });
+  it("requires the hive://join host", () => {
+    const link = encodeURIComponent("https://a.trycloudflare.com/join#S");
+    expect(inviteFromArgv(["Hive.exe", `hive://other?link=${link}`])).toBeNull();
+    expect(inviteFromArgv(["Hive.exe", `hive://?link=${link}`])).toBeNull();
+    expect(inviteFromArgv(["Hive.exe", `hive://JOIN/?link=${link}`])).toBe("https://a.trycloudflare.com/join#S");
+  });
 });

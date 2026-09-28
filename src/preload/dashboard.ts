@@ -23,6 +23,7 @@ const api: DashboardApi = {
   setSpoutOut: (partnerSlug, sourceSlug, enabled) => invoke("set-spout-out", partnerSlug, sourceSlug, enabled),
   updateSettings: (input) => invoke("update-settings", input),
   dismissBanner: (id) => invoke("dismiss-banner", id),
+  dismissInvite: () => invoke("dismiss-invite"),
   listWindows: () => invoke("list-windows"),
   listSpoutSenders: () => invoke("list-spout-senders"),
   copy: (text) => invoke("copy", text),

@@ -19,6 +19,7 @@ export type DashboardSession = Pick<
   | "setSpoutOut"
   | "updateSettings"
   | "dismissBanner"
+  | "dismissInvite"
 >;
 
 export interface DashboardIpcDeps {
@@ -118,6 +119,7 @@ export function registerDashboardIpc(deps: DashboardIpcDeps): void {
     if (typeof id !== "string" || !BANNER_IDS.has(id)) throw new Error("invalid banner id");
     session.dismissBanner(id as BannerId);
   });
+  on("dismiss-invite", () => session.dismissInvite());
   on("list-windows", () => deps.listWindows());
   on("list-spout-senders", () => deps.listSpoutSenders());
   on("copy", (text) => {

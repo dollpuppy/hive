@@ -33,7 +33,13 @@ export interface DashboardState {
   port: number;
   server: { status: ServerStatus; inviteLink: string | null };
   join: { status: JoinStatus | "idle"; detail: JoinDetail | null };
-  partner: { name: string; slug: string; sources: SourceInfo[] } | null;
+  /**
+   * The partner, live (`connected: true`) or kept through the Spout grace window after a plain
+   * disconnect (`connected: false`, spec §10 "reconnecting…"); null once cleared.
+   */
+  partner: { name: string; slug: string; sources: SourceInfo[]; connected: boolean } | null;
+  /** An invite from a hive:// deep link, offered to the user (never auto-joined); null when none. */
+  pendingInvite: string | null;
   sources: LocalSource[];
   /** Partner viewers per local source id. */
   watchers: Record<string, number>;
@@ -77,6 +83,8 @@ export interface DashboardApi {
   setSpoutOut(partnerSlug: string, sourceSlug: string, enabled: boolean): Promise<void>;
   updateSettings(input: SettingsInput): Promise<void>;
   dismissBanner(id: BannerId): Promise<void>;
+  /** Declines the offered deep-link invite (clears `pendingInvite`). */
+  dismissInvite(): Promise<void>;
   listWindows(): Promise<CapturableWindow[]>;
   listSpoutSenders(): Promise<string[]>;
   copy(text: string): Promise<void>;

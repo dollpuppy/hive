@@ -495,3 +495,181 @@ describe("save failures (fix round 1, issue 2)", () => {
     errorSpy.mockRestore();
   });
 });
+
+describe("deep-link invites are offered, never auto-joined (final fix 1)", () => {
+  const link = "https://a.trycloudflare.com/join#S";
+
+  it("offerInvite stores the link in state without joining", () => {
+    expect(last().pendingInvite).toBeNull();
+    const states: DashboardState[] = [];
+    session.on("state", (s: DashboardState) => states.push(s));
+    session.offerInvite(link);
+    expect(last().pendingInvite).toBe(link);
+    expect(states.at(-1)!.pendingInvite).toBe(link);
+    expect(joins).toHaveLength(0);
+  });
+
+  it("dismissInvite clears it", () => {
+    session.offerInvite(link);
+    session.dismissInvite();
+    expect(last().pendingInvite).toBeNull();
+    expect(joins).toHaveLength(0);
+  });
+
+  it("joining (any link) clears it", () => {
+    session.offerInvite(link);
+    session.join("https://b.trycloudflare.com/join#T");
+    expect(last().pendingInvite).toBeNull();
+  });
+});
+
+describe("join while partnered (final fix 2)", () => {
+  const bo: Partner = { name: "Bo", slug: "bo", sources: [] };
+
+  it("refuses with already-partnered while a partner connected to us, starting no join", () => {
+    hub.emit("partner", bo);
+    session.join("https://b.trycloudflare.com/join#T");
+    expect(joins).toHaveLength(0);
+    expect(last().join).toEqual({ status: "failed", detail: "already-partnered" });
+    expect(last().partner).toMatchObject({ slug: "bo", connected: true });
+  });
+
+  it("refuses while joined to a partner, keeping the existing link and handle", () => {
+    session.join("https://a.trycloudflare.com/join#S");
+    joins[0]!.opts.onStatus("connected");
+    hub.emit("partner", bo);
+    expect(() => session.join("https://b.trycloudflare.com/join#T")).toThrow("You're already connected to a partner.");
+    expect(joins).toHaveLength(1);
+    expect(joins[0]!.stopped).toBe(false);
+    expect(last().join).toEqual({ status: "connected", detail: null });
+    // The kept handle is still the live one: leave() stops it.
+    session.leave();
+    expect(joins[0]!.stopped).toBe(true);
+  });
+});
+
+describe("partner kept through the spout grace window (final fix 3)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    make();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const bo: Partner = { name: "Bo", slug: "bo", sources: [] };
+
+  it("exposes the live partner as connected", () => {
+    hub.emit("partner", bo);
+    expect(last().partner).toEqual({ name: "Bo", slug: "bo", sources: [], connected: true });
+  });
+
+  it("keeps the partner as disconnected during the grace window, then clears it", () => {
+    hub.emit("partner", bo);
+    hub.emit("partner", null);
+    expect(last().partner).toEqual({ name: "Bo", slug: "bo", sources: [], connected: false });
+    vi.advanceTimersByTime(60_000);
+    expect(last().partner).toBeNull();
+  });
+
+  it("a reconnect within the window marks it connected again", () => {
+    hub.emit("partner", bo);
+    hub.emit("partner", null);
+    vi.advanceTimersByTime(1_000);
+    hub.emit("partner", bo);
+    expect(last().partner?.connected).toBe(true);
+    vi.advanceTimersByTime(60_000);
+    expect(last().partner?.connected).toBe(true);
+  });
+
+  it.each([
+    ["kick of the partner", () => hub.emit("kicked-partner")],
+    ["being kicked", () => hub.emit("kicked", "removed by partner")],
+  ])("clears it immediately after a %s", (_name, kick) => {
+    hub.emit("partner", bo);
+    kick();
+    hub.emit("partner", null);
+    expect(last().partner).toBeNull();
+  });
+
+  it("clears it on leave() (live partner)", () => {
+    session.join("https://a.trycloudflare.com/join#S");
+    joins[0]!.opts.onStatus("connected");
+    hub.emit("partner", bo);
+    session.leave();
+    hub.emit("partner", null);
+    expect(last().partner).toBeNull();
+  });
+
+  it("clears it on leave() during the grace window", () => {
+    hub.emit("partner", bo);
+    hub.emit("partner", null);
+    session.leave();
+    expect(last().partner).toBeNull();
+  });
+
+  it("spout syncs during the grace window use the kept partner", async () => {
+    hub.emit("partner", bo);
+    hub.emit("partner", null);
+    synced.length = 0;
+    await session.setSpoutOut("bo", "vtuber", true);
+    expect(synced.at(-1)).toEqual([bo, [{ partnerSlug: "bo", sourceSlug: "vtuber" }]]);
+    session.reportSpoutOutputError("bo/vtuber", new Error("name collision"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(synced.at(-1)).toEqual([bo, []]);
+  });
+});
+
+describe("stopServer with a partner is a deliberate disconnect (final fix 4)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    make();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const bo: Partner = { name: "Bo", slug: "bo", sources: [] };
+  // What the real Hub.kick() does with a live peer (the tests drive Hub's events directly).
+  const realisticKick = (): void => {
+    hub.emit("kicked-partner");
+    hub.emit("partner", null);
+  };
+
+  it("disconnects a partner that joined us: no grace period, partner cleared", () => {
+    const kick = vi.spyOn(hub, "kick").mockImplementation(realisticKick);
+    session.startServer();
+    hub.emit("partner", bo);
+    synced.length = 0;
+    session.stopServer();
+    expect(kick).toHaveBeenCalled();
+    expect(synced).toEqual([[null, []]]);
+    expect(last().partner).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("flushes a kept partner (grace window) that had joined us", () => {
+    session.startServer();
+    hub.emit("partner", bo);
+    hub.emit("partner", null);
+    synced.length = 0;
+    session.stopServer();
+    expect(synced).toEqual([[null, []]]);
+    expect(last().partner).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("leaves a partner we joined alone (their server, not ours)", () => {
+    const kick = vi.spyOn(hub, "kick");
+    session.startServer();
+    session.join("https://a.trycloudflare.com/join#S");
+    joins[0]!.opts.onStatus("connected");
+    hub.emit("partner", bo);
+    synced.length = 0;
+    session.stopServer();
+    expect(kick).not.toHaveBeenCalled();
+    expect(synced).toEqual([]);
+    expect(last().partner).toMatchObject({ slug: "bo", connected: true });
+    expect(joins[0]!.stopped).toBe(false);
+  });
+});

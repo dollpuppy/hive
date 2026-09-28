@@ -1,5 +1,6 @@
 import "../../shared/dashboard-api";
 import type { DashboardState, LocalSource } from "../../shared/dashboard-api";
+import { inviteHost } from "../../shared/invite-link";
 import { spoutOutputNames } from "../../shared/spout-name";
 import type { SourceInfo, SourceStatus } from "../../shared/protocol";
 import { h } from "./dom";
@@ -21,22 +22,27 @@ const inviteInput = h("input", { class: "invite-input", placeholder: "Paste part
 inviteInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") void doJoin();
 });
+if (state.pendingInvite) inviteInput.value = state.pendingInvite;
 
 api.onState((next) => {
+  // Only the first connect since the partner was cleared switches tabs: a partner kept through
+  // the grace window ("reconnecting…") is still non-null, so its reconnect doesn't.
   const hadPartner = state.partner !== null;
+  const offered = state.pendingInvite;
   state = next;
+  // A newly offered deep-link invite prefills the box (the prompt asks before joining).
+  if (next.pendingInvite && next.pendingInvite !== offered) inviteInput.value = next.pendingInvite;
   if (!hadPartner && next.partner) tab = "partner";
   if (!next.partner && tab === "partner") tab = "mine";
   render();
 });
 
-async function doJoin(): Promise<void> {
-  const link = inviteInput.value.trim();
+async function doJoin(link = inviteInput.value.trim()): Promise<void> {
   if (!link) return;
   joinError = "";
   try {
     await api.join(link);
-    inviteInput.value = "";
+    if (inviteInput.value.trim() === link) inviteInput.value = "";
   } catch (err) {
     joinError = cleanError(err);
   }
@@ -106,6 +112,25 @@ function joinStatusText(): string {
   }
 }
 
+/** A deep-link invite waiting for the user's OK: joining is never automatic. */
+function renderInvitePrompt(): HTMLElement | null {
+  const link = state.pendingInvite;
+  if (!link) return null;
+  const host = inviteHost(link);
+  const dismiss = h("button", { class: "btn-ghost", onclick: () => void api.dismissInvite() }, "Dismiss");
+  return h(
+    "div",
+    { class: "banner invite-prompt", role: "status", "aria-label": "Invite" },
+    host
+      ? [
+          h("span", { class: "msg" }, `Join ${host}?`),
+          h("button", { class: "btn-primary", onclick: () => void doJoin(link) }, "Join"),
+        ]
+      : h("span", { class: "msg" }, "That invite link isn't valid."),
+    dismiss,
+  );
+}
+
 function renderBanners(): HTMLElement[] {
   return state.banners.map((b) =>
     h(
@@ -149,13 +174,24 @@ function renderTabs(): HTMLElement {
   const tabButton = (id: "partner" | "mine", ...label: (string | HTMLElement)[]): HTMLElement =>
     h(
       "button",
-      { class: tab === id ? "tab active" : "tab", role: "tab", "aria-selected": String(tab === id), onclick: () => ((tab = id), render()) },
+      {
+        class: `tab${tab === id ? " active" : ""}${id === "partner" && state.partner?.connected === false ? " disconnected" : ""}`,
+        role: "tab",
+        "aria-selected": String(tab === id),
+        onclick: () => ((tab = id), render()),
+      },
       ...label,
     );
   return h(
     "div",
     { class: "tabs", role: "tablist" },
-    state.partner ? tabButton("partner", state.partner.name, h("span", { class: "dot", "aria-hidden": "true" })) : null,
+    state.partner
+      ? tabButton(
+          "partner",
+          state.partner.name,
+          h("span", { class: state.partner.connected ? "dot" : "dot off", "aria-hidden": "true" }),
+        )
+      : null,
     tabButton("mine", `My sources (${state.sources.length})`),
   );
 }
@@ -167,13 +203,14 @@ function partnerRow(
   keys: Set<string>,
 ): HTMLElement {
   const key = `${partner.slug}/${src.slug}`;
-  const canWatch = watchable(src.status);
+  // No previews for a partner that's only kept through the grace window (nothing to watch).
+  const canWatch = partner.connected && watchable(src.status);
   if (canWatch) keys.add(key);
   const spoutOn = state.spoutOut.some((k) => k.partnerSlug === partner.slug && k.sourceSlug === src.slug);
   const spoutError = state.spoutOutErrors[key];
   return h(
     "div",
-    { class: "row" },
+    { class: partner.connected ? "row" : "row disconnected" },
     canWatch ? previews.get(partner.slug, src.slug) : h("div", { class: "thumb" }),
     h(
       "div",
@@ -215,8 +252,13 @@ function renderPartner(partner: NonNullable<DashboardState["partner"]>, keys: Se
     h(
       "div",
       { class: "partner-head" },
-      h("span", { class: "status" }, `Connected to ${partner.name}`),
-      h("button", { class: "btn-ghost danger", onclick: () => void api.kick() }, "Disconnect partner"),
+      partner.connected
+        ? h("span", { class: "status" }, `Connected to ${partner.name}`)
+        : h("span", { class: "status" }, `${partner.name} — reconnecting…`),
+      // Kicking needs a live link; a kept partner can only reconnect or time out.
+      partner.connected
+        ? h("button", { class: "btn-ghost danger", onclick: () => void api.kick() }, "Disconnect partner")
+        : null,
     ),
     partner.sources.length === 0 ? h("div", { class: "empty" }, `${partner.name} hasn't added any sources yet.`) : null,
     partner.sources.map((s) => partnerRow(partner, s, spoutNames, keys)),
@@ -282,7 +324,8 @@ function render(): void {
   const selection = [inviteInput.selectionStart, inviteInput.selectionEnd] as const;
   const keys = new Set<string>();
   const content = tab === "partner" && state.partner ? renderPartner(state.partner, keys) : renderMine(keys);
-  root.replaceChildren(...renderBanners(), renderTop(), renderTabs(), content);
+  const prompt = renderInvitePrompt();
+  root.replaceChildren(...(prompt ? [prompt] : []), ...renderBanners(), renderTop(), renderTabs(), content);
   previews.retain(keys);
   if (focused) {
     inviteInput.focus();

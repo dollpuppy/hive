@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildInviteLink, generateSecret, parseInviteLink, secretsEqual } from "../../src/main/invite";
+import { inviteHost } from "../../src/shared/invite-link";
 
 describe("generateSecret", () => {
   it("is 22 base64url chars (128 bits) and random", () => {
@@ -46,5 +47,17 @@ describe("invite links", () => {
     expect(parseInviteLink("https://a.trycloudflare.com/join")).toBeNull();
     expect(parseInviteLink("https://a.trycloudflare.com/other#abc")).toBeNull();
     expect(parseInviteLink("ftp://a.trycloudflare.com/join#abc")).toBeNull();
+  });
+});
+
+describe("inviteHost", () => {
+  it("returns the host (and port) of a valid invite", () => {
+    expect(inviteHost("https://a-b.trycloudflare.com/join#S")).toBe("a-b.trycloudflare.com");
+    expect(inviteHost(" http://127.0.0.1:7420/join#abc ")).toBe("127.0.0.1:7420");
+  });
+  it("returns null for an invalid invite", () => {
+    expect(inviteHost("not a url")).toBeNull();
+    expect(inviteHost("https://a.trycloudflare.com/join")).toBeNull();
+    expect(inviteHost("javascript:alert(1)//join#x")).toBeNull();
   });
 });
