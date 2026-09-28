@@ -34,6 +34,49 @@ function requireSize(value: number, what: string, max: number): number {
 let configuredSession: Session | null = null;
 
 /**
+ * Loopback host:port pairs that are currently allowed to be requested, one entry
+ * per currently-open source whose own configured URL is itself loopback (keyed by
+ * sourceId so a close() or a reopen with a different URL can revoke just that
+ * source's entry without disturbing anyone else's). All URL sources share a single
+ * session (URL_SOURCES_PARTITION), so this registry backs a single onBeforeRequest
+ * listener registered once for that session — Electron keeps only the most recently
+ * registered listener per event per session, so per-source registration would silently
+ * clobber earlier sources' listeners instead of composing with them.
+ */
+const loopbackAllow = new Map<string, string>();
+
+/** Strips IPv6 brackets and lowercases, so host comparisons are case-insensitive. */
+function normalizeHost(hostname: string): string {
+  const h = hostname.toLowerCase();
+  return h.startsWith("[") && h.endsWith("]") ? h.slice(1, -1) : h;
+}
+
+/** 127.0.0.0/8, localhost, *.localhost, and the IPv6 loopback address. */
+function isLoopbackHost(host: string): boolean {
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::1") return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  return m !== null && m.slice(1).every((o) => Number(o) <= 255) && m[1] === "127";
+}
+
+const DEFAULT_PORT: Record<string, string> = { "http:": "80", "https:": "443" };
+
+/** Normalized "host:port" for a URL, filling in the scheme's default port when absent. */
+function hostPort(u: URL): string {
+  return `${normalizeHost(u.hostname)}:${u.port || (DEFAULT_PORT[u.protocol] ?? "")}`;
+}
+
+/**
+ * Records or clears sourceId's loopback allowance from its configured URL: an http(s)
+ * source that itself points at a loopback host may only ever reach that one host:port,
+ * even though the session it renders in is shared with every other URL source.
+ */
+function setLoopbackAllowance(sourceId: string, url: string): void {
+  const u = new URL(url); // caller already validated this is a well-formed http(s) URL
+  if (isLoopbackHost(normalizeHost(u.hostname))) loopbackAllow.set(sourceId, hostPort(u));
+  else loopbackAllow.delete(sourceId);
+}
+
+/**
  * The URL-source session, locked down once: remote pages get no permissions,
  * no display capture, and no downloads. Lazy because sessions need app ready.
  */
@@ -52,6 +95,28 @@ function urlSourcesSession(): Session {
     }
   });
   ses.on("will-download", (_event, item) => item.cancel());
+  // Blocks every loopback request from every URL source (the whole session's traffic,
+  // since Electron only keeps the last-registered onBeforeRequest listener per session)
+  // unless it targets the exact host:port of some currently-open source's own loopback
+  // URL. Without this, a malicious or compromised remote page loaded as a URL source
+  // could probe or attack services on the user's own machine (other Hive ports, other
+  // localhost apps) using the renderer's network stack.
+  ses.webRequest.onBeforeRequest((details, callback) => {
+    let u: URL;
+    try {
+      u = new URL(details.url);
+    } catch {
+      callback({ cancel: true });
+      return;
+    }
+    if (!isLoopbackHost(normalizeHost(u.hostname))) {
+      callback({});
+      return;
+    }
+    const target = hostPort(u);
+    const allowed = [...loopbackAllow.values()].includes(target);
+    callback({ cancel: !allowed });
+  });
   configuredSession = ses;
   return ses;
 }
@@ -97,6 +162,7 @@ export class UrlSources extends EventEmitter {
     requireSize(height, "height", MAX_DIMENSION);
     requireSize(fps, "fps", MAX_FPS);
     this.close(sourceId);
+    setLoopbackAllowance(sourceId, url);
 
     const win = new BrowserWindow({
       show: false,
@@ -207,6 +273,7 @@ export class UrlSources extends EventEmitter {
     if (!entry) return;
     if (handle !== undefined && entry.handle !== handle) return;
     this.sources.delete(sourceId);
+    loopbackAllow.delete(sourceId);
     if (entry.retryTimer) clearTimeout(entry.retryTimer);
     if (!entry.win.isDestroyed()) entry.win.destroy();
   }
@@ -218,6 +285,7 @@ export class UrlSources extends EventEmitter {
   private giveUp(sourceId: string, entry: UrlSource, reason: string): void {
     if (this.sources.get(sourceId) !== entry) return;
     this.sources.delete(sourceId);
+    loopbackAllow.delete(sourceId);
     if (entry.retryTimer) clearTimeout(entry.retryTimer);
     entry.retryTimer = null;
     setTimeout(() => {
