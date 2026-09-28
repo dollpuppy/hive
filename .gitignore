@@ -6,3 +6,4 @@ coverage/
 *.log
 .serena/
 tests/e2e/.harness-dist/
+tests/e2e/.alpha-dist/

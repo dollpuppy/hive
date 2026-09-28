@@ -13,6 +13,13 @@ export class CaptureError extends Error {
 export interface Capture {
   stream: MediaStream;
   dispose?(): void;
+  /**
+   * Registers the manager's "this capture died" callback, for producers whose death
+   * the video track can't signal (stopping a track locally never fires its own
+   * `ended`). Treated exactly like the track ending. May call `listener` right away
+   * if the capture already died.
+   */
+  onEnded?(listener: () => void): void;
 }
 
 export type Opener = (source: SourceConfig) => Promise<Capture>;
@@ -72,7 +79,7 @@ export class CaptureManager {
    * Replace the source list. New sources report idle. A source that is unavailable
    * and not open is reset to idle too, so re-sending the list (e.g. after the user
    * re-picks the same window or device) lets the next subscriber try again.
-   * `waiting` is left alone: Spout discovery owns that transition.
+   * `waiting` is left alone: `setAvailability` owns that transition.
    */
   setSources(sources: SourceConfig[]): void {
     const prev = this.sources;
@@ -118,16 +125,24 @@ export class CaptureManager {
         if (track) {
           track.contentHint = contentHintFor(source.kind);
           track.addEventListener("ended", () => this.onTrackEnded(sourceId, entry));
-          if (track.readyState === "ended") {
-            // Died before we could listen ("ended" never fires for it). Nobody holds this
-            // stream yet, so fail the open like an opener error: waiters reject, no release follows.
-            entry.stopped = true;
-            if (this.active.get(sourceId) === entry) this.active.delete(sourceId);
-            stream.getTracks().forEach((t) => t.stop());
-            capture.dispose?.();
-            this.report(sourceId, "unavailable");
-            throw new CaptureError("unavailable", "capture ended as it opened");
-          }
+        }
+        // A producer-side death reported while still registering counts as "ended as it opened".
+        let registering = true;
+        let endedEarly = false;
+        capture.onEnded?.(() => {
+          if (registering) endedEarly = true;
+          else this.onTrackEnded(sourceId, entry);
+        });
+        registering = false;
+        if (track?.readyState === "ended" || endedEarly) {
+          // Died before we could listen ("ended" never fires for it). Nobody holds this
+          // stream yet, so fail the open like an opener error: waiters reject, no release follows.
+          entry.stopped = true;
+          if (this.active.get(sourceId) === entry) this.active.delete(sourceId);
+          stream.getTracks().forEach((t) => t.stop());
+          capture.dispose?.();
+          this.report(sourceId, "unavailable");
+          throw new CaptureError("unavailable", "capture ended as it opened");
         }
         entry.resolved = capture;
         this.report(sourceId, "live");
@@ -159,6 +174,33 @@ export class CaptureManager {
     if (entry.refs > 0) return;
     this.teardown(sourceId, entry);
     if (this.sources.has(sourceId)) this.report(sourceId, "idle");
+  }
+
+  /**
+   * A Spout sender appeared or disappeared (source id already mapped from sender name
+   * by the caller). Unavailable: report `waiting`, tearing down and ending sessions if
+   * the source was open or still opening - same fate as a config change or a dying
+   * track. Available: only a source parked in `waiting` moves, back to `idle`, so the
+   * next subscriber can try again. Repeated calls with the same value are a no-op past
+   * the first, since `applySources` re-reports availability on every sync.
+   */
+  setAvailability(sourceId: string, available: boolean): void {
+    if (!this.sources.has(sourceId)) return;
+    if (available) {
+      if (this.statuses.get(sourceId) === "waiting" && !this.active.has(sourceId)) {
+        this.report(sourceId, "idle");
+      }
+      return;
+    }
+    const entry = this.active.get(sourceId);
+    if (entry) {
+      this.teardown(sourceId, entry);
+      this.report(sourceId, "waiting");
+      this.opts.onEnded(sourceId);
+      return;
+    }
+    if (this.statuses.get(sourceId) === "waiting") return;
+    this.report(sourceId, "waiting");
   }
 
   private report(sourceId: string, status: SourceStatus): void {

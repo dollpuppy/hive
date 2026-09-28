@@ -9,12 +9,15 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "vitest run -c vitest.e2e.config.ts",
+    "test:spout": "electron tests/electron/spout-roundtrip.mjs",
     "build:viewer": "vite build -c vite.viewer.config.ts",
     "build": "electron-vite build && npm run build:viewer",
     "dev": "npm run build:viewer && electron-vite dev",
     "start": "npm run build && electron-vite preview --skipBuild"
   },
   "dependencies": {
+    "@napolab/texture-bridge-core": "0.15.0",
+    "@napolab/texture-bridge-renderer": "0.15.0",
     "ws": "8.21.3",
     "zod": "4.6.5"
   },

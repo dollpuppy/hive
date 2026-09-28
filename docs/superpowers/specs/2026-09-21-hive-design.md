@@ -151,15 +151,16 @@ Inline hints:
 |---|---|
 | Window/Screen | Electron `desktopCapturer` source id → `getUserMedia({ video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId }}})` with frame-rate/size constraints from preset |
 | Webcam | `getUserMedia({ video: { deviceId, width, height, frameRate }})` |
-| Spout2 | texture-bridge `createSharedTextureReceiver({ senderName, target: publisherWindow })` → GPU-backed `VideoFrame` in Publisher (no CPU readback) → alpha packing (6.2) → `MediaStreamTrackGenerator`. Each `VideoFrame` is `close()`d after drawing. Sender picker is fed by `SenderDiscovery`. |
-| Browser URL | Offscreen BrowserWindow (`offscreen: true`) at configured size; `paint` event bitmap → `VideoFrame` → `MediaStreamTrackGenerator` (opaque) |
+| Spout2 | texture-bridge `createSharedTextureReceiver({ senderName, target: publisherWindow, extraArgs: [sourceId] })` routes each shared-texture frame to its Publisher-side consumer by `sourceId` (no CPU readback) → alpha packing (6.2) → `canvas.captureStream()`. texture-bridge's frame pool closes each `VideoFrame` after the synchronous handler returns; consumers never close it themselves. Sender picker is fed by `SenderDiscovery`. |
+| Browser URL | Rendered in an offscreen `BrowserWindow` with `useSharedTexture`; frames are forwarded zero-copy into the Publisher via `forwardSharedTexture` and drawn letterboxed onto a canvas → `canvas.captureStream()` (opaque) |
 
 ### 6.2 Alpha packing (Spout2 only)
 
-- **Sender:** WebGL on an `OffscreenCanvas` of size `2W × H`; the incoming `VideoFrame` is uploaded with `texImage2D` (GPU-to-GPU). Left half = RGB of the frame. Right half = alpha replicated into RGB as greyscale. Output feeds the track.
+- **Sender:** WebGL on an `HTMLCanvasElement` of size `2W × H`; the incoming `VideoFrame` is uploaded with `texImage2D` (GPU-to-GPU). Left half = RGB of the frame. Right half = alpha replicated into RGB as greyscale. The canvas is published via `canvas.captureStream()`.
 - **Receiver (viewer page):** WebGL shader samples RGB from `u ∈ [0, 0.5)` and alpha from the red channel at `u + 0.5`; draws to a transparent canvas sized `W × H`.
 - Bitrate for alpha sources = preset bitrate × 1.6.
 - `sources` message reports logical `width`/`height` (W × H), not packed size.
+- For a Spout source, W × H is the source's preset size, not the sender's: each sender frame is letterboxed (transparent bars) into it, so the advertised size stays stable when the sender resizes or reconnects.
 
 ### 6.3 Encoding
 
@@ -221,7 +222,8 @@ Optional alternative to the browser-source URL, per received source.
 | `cloudflared` fails to start or tunnel drops | Auto-restart up to 3 times with backoff. If the URL changes, banner: "Invite link changed — resend it." Existing P2P video continues (only signaling used the tunnel). After 3 failures: error state with Retry. |
 | Partner Hub disconnects | Partner tab greys out with "reconnecting…". Joiner side retries the same link for 60 s. Viewer pages draw nothing and resume automatically. |
 | P2P connection fails (ICE `failed`, or not `connected` within 10 s) | Banner: "Direct connection failed — add a TURN server in Settings", with help link. |
-| Spout sender disappears | `SenderDiscovery` `removed` event → source `waiting`; receiver disposed. `added` event for the same name → receiver recreated, source resumes. |
+| Spout sender disappears | `SenderDiscovery` `removed` event, or the receiver stops (`ReceiverStoppedError`) → source `waiting`; receiver disposed, sessions ended. Sender back — discovery `added`, or (after a stopped/failed receiver, which discovery still lists) a retry nudge at 3 s doubling to 60 s → source `idle`. Viewers resubscribe via their watch retry, which reopens the receiver. |
+| URL source crashes or fails to load | Reloaded with backoff (1 s, 2 s, 4 s); more than 3 failures within 60 s → gives up: window closed, source `unavailable`, sessions ended. |
 | Spout output fails to start | Row toggle reverts to off with an inline error; browser-source URL still works. |
 | Window closed / webcam unplugged | Source `unavailable` (amber); user must Edit to re-pick. |
 | Port 7420 busy | Try 7421–7429. Banner warns that OBS URLs use the new port. Fail with a clear error if none free. |
@@ -238,8 +240,8 @@ Optional alternative to the browser-source URL, per received source.
 
 ## 12. Open risks
 
-- `MediaStreamTrackGenerator` availability in the shipped Electron/Chromium version — verify at project setup; fallback is `canvas.captureStream()`.
-- **Alpha on Spout receive:** texture-bridge documents alpha explicitly only for sending. Frames arrive as `bgra`/`rgba`, so alpha should survive, but verify with VSeeFace in the first spike. Fallback: the RGBA-readback receiver (`createTextureReceiver`).
+- ~~`MediaStreamTrackGenerator` availability~~ — moot: Plan 3 publishes Spout/URL frames with `canvas.captureStream()`.
+- **Alpha on Spout receive:** texture-bridge documents alpha explicitly only for sending. The spike PASSED with the readback receiver (`createTextureReceiver`, whose pixel data is BGRA despite the "RGBA" naming); the GPU shared-texture path (`createSharedTextureReceiver`) still needs the Plan 3 Task 12 manual check with VSeeFace. Fallback: the readback receiver.
 - **texture-bridge maturity:** pre-1.0 (v0.15.0), low adoption (~170 downloads/month), single maintainer. Pin the exact version. MIT licence allows forking if it stalls.
 - OBS browser source (CEF) must support WebRTC H.264 decode; verify on current OBS. VP8 fallback covers it if not.
 - Cloudflare quick tunnels are best-effort with no uptime guarantee; acceptable for v1.
@@ -252,7 +254,7 @@ Optional alternative to the browser-source URL, per received source.
 - The viewer sends `ice-failed` only when a session never reached `connected` (ICE failure or 10 s connect timeout); a session that connected and later dropped just retries.
 - A newer Publisher connection replaces the old one, which is closed with code `4001` (`PUBLISHER_REPLACED_CLOSE_CODE`, `src/shared/close-codes.ts`); a client closed with 4001 halts instead of reconnecting.
 - Viewer URL peer segment `me` is reserved for previews of your own sources; partners never get that slug.
-- `/local/publisher` is protected by a per-launch token; `/local/viewer` by an Origin allowlist (own origin, `file://`, dev server). Chromium sends `Origin: file://` on WebSocket handshakes from `file:` pages.
+- `/local/publisher` is protected by a per-launch token; `/local/viewer` by an Origin allowlist (own origin, plus the renderer dev server when running under it). `file://` is not allowed: any local HTML file sends that Origin; the Publisher (a `file:` page) uses `/local/publisher` instead.
 - Window capture: each open (select-window IPC + `getDisplayMedia()`) is serialized and times out after 10 s. Main grants display-media only to the Publisher's top-level frame, for a one-shot window selection that expires after 10 s.
 - Source status `idle` means ready (capture starts on first subscriber); `live` means capturing.
-- Planned (Plan 3): publisher frames from Spout/URL sources will be drawn to canvases and published with `canvas.captureStream()` rather than `MediaStreamTrackGenerator`.
+- Plan 3: publisher frames from Spout/URL sources are drawn to canvases and published with `canvas.captureStream()` rather than `MediaStreamTrackGenerator`.
