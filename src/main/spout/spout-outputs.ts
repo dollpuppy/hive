@@ -4,12 +4,27 @@ import type { DesiredOutput } from "./spout-output-plan";
 /** Frame drops are logged at most this often per output. */
 export const DROP_LOG_INTERVAL_MS = 30_000;
 
+/** Backoff before each retry of a failed bridge; one failure more than this is reported. */
+export const RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000, 4_000];
+
+/** A bridge that stays up this long earns back its full retry budget. */
+export const STABLE_AFTER_MS = 30_000;
+
+export interface SpoutOutputsOptions {
+  /** Delays before successive retries (default {@link RETRY_DELAYS_MS}). */
+  retryDelaysMs?: readonly number[];
+  /** Uptime after which a bridge's failure count resets (default {@link STABLE_AFTER_MS}). */
+  stableAfterMs?: number;
+}
+
 interface Active {
   bridge: TextureBridge;
   output: DesiredOutput;
   drops: number;
   lastDropLog: number;
   suppressedDrops: number;
+  /** Resets the key's failure count once the bridge has stayed up long enough. */
+  stableTimer: ReturnType<typeof setTimeout>;
 }
 
 const toError = (err: unknown): Error => (err instanceof Error ? err : new Error(String(err)));
@@ -21,25 +36,52 @@ const sameSpec = (a: DesiredOutput, b: DesiredOutput): boolean =>
  * Keeps one texture-bridge sender per desired output. Each bridge renders the
  * local viewer page offscreen with alpha and publishes it over Spout.
  *
- * `sync()` never rejects: every failure — a rejected `createTextureBridge`,
- * a throwing `resize()`, or a later `"error"` from the bridge — is reported
- * through `onError` instead. Teardown (`disable`/`disposeAll`) never throws:
- * `bridge.dispose()` is contract-guaranteed idempotent and side-effect-free
- * on failure.
+ * `sync()` never rejects: failures are retried, and only reported through
+ * `onError` when they can't be recovered from. Teardown (`disable`/`disposeAll`)
+ * never throws: `bridge.dispose()` is contract-guaranteed idempotent.
+ *
+ * Failures and recovery:
+ * - A rejected `createTextureBridge()` is retried after each of `retryDelaysMs`
+ *   (1 s, 2 s, 4 s) while the key is still wanted; the failure after the last
+ *   retry goes to `onError`. A sync that drops the key cancels its retries.
+ * - A running bridge is disposed and recreated, through the same backoff and
+ *   budget, on its `"error"` event or when its offscreen renderer process goes
+ *   away. texture-bridge 0.15.0 does not recover from either by itself:
+ *   `"error"` carries a `TextureSendError` thrown by the native Spout send in
+ *   the bridge's paint handler, and the bridge keeps the same sender, so a dead
+ *   sender (lost device) fails every frame from then on. And the bridge never
+ *   listens for `render-process-gone` on its offscreen window: a crashed
+ *   renderer just stops painting — no event, no reload, the Spout output
+ *   freezes on its last frame — so we watch `renderWindow.webContents` here.
+ * - A resize that throws is reported directly (texture-bridge rolls the size
+ *   back, so the bridge keeps running at its old size).
+ *
+ * Failures count against one budget per key, so a bridge that dies right after
+ * every recreation is given up on too. A bridge that stays up for
+ * `stableAfterMs` resets the count.
  */
 export class SpoutOutputs {
   private readonly active = new Map<string, Active>();
   /** Keys with a `createTextureBridge()` call in flight. */
   private readonly pending = new Set<string>();
-  /** Latest desired spec for a pending key, applied once creation lands. */
-  private readonly pendingLatest = new Map<string, DesiredOutput>();
-  private wanted = new Set<string>();
+  /** Keys waiting out a retry backoff. */
+  private readonly retries = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Consecutive failures per key since its last stable bridge. */
+  private readonly failures = new Map<string, number>();
+  /** Latest desired spec per wanted key. */
+  private wanted = new Map<string, DesiredOutput>();
   private disposed = false;
+  private readonly retryDelaysMs: readonly number[];
+  private readonly stableAfterMs: number;
 
   constructor(
     private readonly baseUrl: () => string,
     private readonly onError: (key: string, error: Error) => void,
-  ) {}
+    options: SpoutOutputsOptions = {},
+  ) {
+    this.retryDelaysMs = options.retryDelaysMs ?? RETRY_DELAYS_MS;
+    this.stableAfterMs = options.stableAfterMs ?? STABLE_AFTER_MS;
+  }
 
   keys(): string[] {
     return [...this.active.keys()];
@@ -54,11 +96,21 @@ export class SpoutOutputs {
     return this.active.get(key)?.drops ?? 0;
   }
 
+  /**
+   * Converges on `desired`. Resolves once each output's first creation attempt
+   * has settled; retries continue in the background.
+   */
   async sync(desired: DesiredOutput[]): Promise<void> {
     if (this.disposed) return;
-    this.wanted = new Set(desired.map((d) => d.key));
+    this.wanted = new Map(desired.map((d) => [d.key, d]));
     for (const key of [...this.active.keys()]) {
       if (!this.wanted.has(key)) this.disable(key);
+    }
+    for (const key of [...this.retries.keys()]) {
+      if (!this.wanted.has(key)) this.cancelRetry(key);
+    }
+    for (const key of [...this.failures.keys()]) {
+      if (!this.wanted.has(key)) this.failures.delete(key);
     }
     await Promise.all(desired.map((d) => this.ensure(d)));
   }
@@ -66,7 +118,8 @@ export class SpoutOutputs {
   disposeAll(): void {
     this.disposed = true;
     this.wanted.clear();
-    this.pendingLatest.clear();
+    for (const key of [...this.retries.keys()]) this.cancelRetry(key);
+    this.failures.clear();
     for (const key of [...this.active.keys()]) this.disable(key);
   }
 
@@ -89,15 +142,18 @@ export class SpoutOutputs {
       }
       return;
     }
-    if (this.pending.has(d.key)) {
-      // A newer spec arrived while creation for this key is already in
-      // flight; remember it so it's applied once that creation lands.
-      this.pendingLatest.set(d.key, d);
-      return;
-    }
+    // Creation in flight or a retry scheduled: either picks up the latest
+    // spec from `wanted` once it lands or fires.
+    if (this.pending.has(d.key) || this.retries.has(d.key)) return;
+    await this.create(d);
+  }
+
+  /** One creation attempt. Never rejects. */
+  private async create(d: DesiredOutput): Promise<void> {
     this.pending.add(d.key);
+    let bridge: TextureBridge;
     try {
-      const bridge = await createTextureBridge({
+      bridge = await createTextureBridge({
         name: d.name,
         width: d.width,
         height: d.height,
@@ -106,27 +162,76 @@ export class SpoutOutputs {
         includeAlpha: true,
         pixelExact: true,
       });
-      this.pending.delete(d.key);
-      const latest = this.pendingLatest.get(d.key);
-      this.pendingLatest.delete(d.key);
-      if (this.disposed || !this.wanted.has(d.key)) {
-        bridge.dispose();
-        return;
-      }
-      const entry: Active = { bridge, output: d, drops: 0, lastDropLog: -Infinity, suppressedDrops: 0 };
-      bridge.on("error", (err: Error) => this.onError(d.key, err));
-      bridge.on("frameDropped", (defect: PaintDefect) => this.onFrameDropped(d.key, entry, defect));
-      this.active.set(d.key, entry);
-      if (latest && !sameSpec(latest, d)) {
-        // A resize/rename arrived mid-creation; re-run ensure with the
-        // latest spec so the bridge converges instead of staying stale.
-        await this.ensure(latest);
-      }
     } catch (err) {
       this.pending.delete(d.key);
-      this.pendingLatest.delete(d.key);
-      this.onError(d.key, toError(err));
+      this.fail(d.key, toError(err));
+      return;
     }
+    this.pending.delete(d.key);
+    const latest = this.wanted.get(d.key);
+    if (this.disposed || !latest) {
+      bridge.dispose();
+      return;
+    }
+    const entry: Active = {
+      bridge,
+      output: d,
+      drops: 0,
+      lastDropLog: -Infinity,
+      suppressedDrops: 0,
+      stableTimer: setTimeout(() => {
+        if (this.active.get(d.key) === entry) this.failures.delete(d.key);
+      }, this.stableAfterMs),
+    };
+    bridge.on("error", (err: Error) => this.onRuntimeFailure(d.key, entry, err));
+    bridge.on("frameDropped", (defect: PaintDefect) => this.onFrameDropped(d.key, entry, defect));
+    bridge.renderWindow.webContents.on("render-process-gone", (_event, details) =>
+      this.onRuntimeFailure(d.key, entry, new Error(`Spout output renderer process gone (${details.reason})`)),
+    );
+    this.active.set(d.key, entry);
+    if (!sameSpec(latest, d)) {
+      // A resize/rename arrived mid-creation; re-run ensure with the
+      // latest spec so the bridge converges instead of staying stale.
+      await this.ensure(latest);
+    }
+  }
+
+  /** A running bridge failed: tear it down and recreate it through the retry path. */
+  private onRuntimeFailure(key: string, entry: Active, error: Error): void {
+    // Only the first failure of the current bridge counts; later events from a
+    // bridge already torn down (or disabled) are ignored.
+    if (this.active.get(key) !== entry) return;
+    this.disable(key);
+    this.fail(key, error);
+  }
+
+  /** Schedules a retry for a still-wanted key, or reports `error` once the budget is spent. */
+  private fail(key: string, error: Error): void {
+    if (this.disposed || !this.wanted.has(key)) return;
+    const count = (this.failures.get(key) ?? 0) + 1;
+    const delay = this.retryDelaysMs[count - 1];
+    if (delay === undefined) {
+      this.failures.delete(key);
+      this.onError(key, error);
+      return;
+    }
+    this.failures.set(key, count);
+    this.retries.set(
+      key,
+      setTimeout(() => {
+        this.retries.delete(key);
+        const latest = this.wanted.get(key);
+        if (this.disposed || !latest || this.active.has(key) || this.pending.has(key)) return;
+        void this.create(latest);
+      }, delay),
+    );
+  }
+
+  private cancelRetry(key: string): void {
+    const timer = this.retries.get(key);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.retries.delete(key);
   }
 
   private onFrameDropped(key: string, entry: Active, defect: PaintDefect): void {
@@ -146,6 +251,7 @@ export class SpoutOutputs {
     const entry = this.active.get(key);
     if (!entry) return;
     this.active.delete(key);
+    clearTimeout(entry.stableTimer);
     entry.bridge.dispose();
   }
 }

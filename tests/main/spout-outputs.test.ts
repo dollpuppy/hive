@@ -25,6 +25,7 @@ vi.mock("@napolab/texture-bridge-renderer", () => {
 });
 
 class FakeBridge extends EventEmitter {
+  renderWindow = { webContents: new EventEmitter() };
   resizeCalls: { width: number; height: number }[] = [];
   disposed = false;
   resizeThrows: Error | null = null;
@@ -75,6 +76,7 @@ async function flush(): Promise<void> {
 }
 
 let SpoutOutputs: typeof import("../../src/main/spout/spout-outputs").SpoutOutputs;
+let STABLE_AFTER_MS: number;
 let errors: [string, Error][];
 let outputs: InstanceType<typeof SpoutOutputs>;
 
@@ -82,7 +84,7 @@ beforeEach(async () => {
   h.state.creates = [];
   h.state.bridges = [];
   h.state.calls = [];
-  ({ SpoutOutputs } = await import("../../src/main/spout/spout-outputs"));
+  ({ SpoutOutputs, STABLE_AFTER_MS } = await import("../../src/main/spout/spout-outputs"));
   errors = [];
   outputs = new SpoutOutputs(
     () => "http://127.0.0.1:1234",
@@ -193,23 +195,215 @@ describe("SpoutOutputs", () => {
     expect(outputs.keys()).toEqual(["p/s"]);
   });
 
-  it("reports onError when create rejects, and sync never rejects", async () => {
+  it("sync never rejects when create rejects, and nothing is reported before the retries run out", async () => {
+    vi.useFakeTimers();
     const p = outputs.sync([output()]);
-    const err = new Error("no device");
-    rejectCreate(0, err);
+    rejectCreate(0, new Error("no device"));
     await expect(p).resolves.toBeUndefined();
-    expect(errors).toEqual([["p/s", err]]);
+    expect(errors).toEqual([]);
     expect(outputs.keys()).toEqual([]);
   });
 
-  it("forwards bridge 'error' events via onError without tearing it down", async () => {
-    await Promise.all([outputs.sync([output()]), (async () => resolveCreate(0))()]);
-    const bridge = h.state.bridges[0] as FakeBridge;
-    const err = new Error("send failed");
-    bridge.emit("error", err);
-    expect(errors).toEqual([["p/s", err]]);
-    expect(outputs.keys()).toEqual(["p/s"]);
-    expect(bridge.disposed).toBe(false);
+  describe("create retry", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    it("retries a rejected create after 1 s, 2 s and 4 s, then reports the last error", async () => {
+      void outputs.sync([output()]);
+      rejectCreate(0, new Error("fail 1"));
+      await vi.advanceTimersByTimeAsync(999);
+      expect(h.state.calls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.state.calls).toHaveLength(2);
+      rejectCreate(1, new Error("fail 2"));
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(h.state.calls).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.state.calls).toHaveLength(3);
+      rejectCreate(2, new Error("fail 3"));
+      await vi.advanceTimersByTimeAsync(3999);
+      expect(h.state.calls).toHaveLength(3);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.state.calls).toHaveLength(4);
+      expect(errors).toEqual([]);
+      const last = new Error("fail 4");
+      rejectCreate(3, last);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(errors).toEqual([["p/s", last]]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.state.calls).toHaveLength(4);
+      expect(outputs.keys()).toEqual([]);
+    });
+
+    it("keeps a bridge whose retry succeeds, without reporting an error", async () => {
+      void outputs.sync([output()]);
+      rejectCreate(0, new Error("fail 1"));
+      await vi.advanceTimersByTimeAsync(1000);
+      resolveCreate(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outputs.keys()).toEqual(["p/s"]);
+      expect(errors).toEqual([]);
+    });
+
+    it("honors injected retry delays", async () => {
+      outputs = new SpoutOutputs(
+        () => "http://127.0.0.1:1234",
+        (key, err) => errors.push([key, err]),
+        { retryDelaysMs: [10] },
+      );
+      void outputs.sync([output()]);
+      rejectCreate(0, new Error("fail 1"));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(h.state.calls).toHaveLength(2);
+      const last = new Error("fail 2");
+      rejectCreate(1, last);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(errors).toEqual([["p/s", last]]);
+    });
+
+    it("cancels pending retries when a later sync no longer wants the key", async () => {
+      void outputs.sync([output()]);
+      rejectCreate(0, new Error("fail 1"));
+      await vi.advanceTimersByTimeAsync(0);
+      await outputs.sync([]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.state.calls).toHaveLength(1);
+      expect(errors).toEqual([]);
+    });
+
+    it("neither retries nor reports a create that rejects after the key became unwanted", async () => {
+      const p = outputs.sync([output()]);
+      await outputs.sync([]);
+      rejectCreate(0, new Error("late"));
+      await p;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.state.calls).toHaveLength(1);
+      expect(errors).toEqual([]);
+    });
+
+    it("disposeAll cancels pending retries", async () => {
+      void outputs.sync([output()]);
+      rejectCreate(0, new Error("fail 1"));
+      await vi.advanceTimersByTimeAsync(0);
+      outputs.disposeAll();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.state.calls).toHaveLength(1);
+      expect(errors).toEqual([]);
+    });
+
+    it("a sync during the backoff starts no parallel create, and the retry uses the latest spec", async () => {
+      void outputs.sync([output()]);
+      rejectCreate(0, new Error("fail 1"));
+      await vi.advanceTimersByTimeAsync(0);
+      await outputs.sync([output({ width: 1920, height: 1080 })]);
+      expect(h.state.calls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(h.state.calls).toHaveLength(2);
+      expect(h.state.calls[1]).toMatchObject({ width: 1920, height: 1080 });
+    });
+  });
+
+  describe("runtime failure recovery", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    async function started(): Promise<FakeBridge> {
+      void outputs.sync([output()]);
+      const bridge = resolveCreate(0);
+      await vi.advanceTimersByTimeAsync(0);
+      return bridge;
+    }
+
+    it("disposes a bridge that emits 'error' and recreates it after 1 s, without reporting", async () => {
+      const bridge = await started();
+      bridge.emit("error", new Error("send failed"));
+      expect(bridge.disposed).toBe(true);
+      expect(outputs.keys()).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(h.state.calls).toHaveLength(2);
+      resolveCreate(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outputs.keys()).toEqual(["p/s"]);
+      expect(errors).toEqual([]);
+    });
+
+    it("recreates a bridge whose offscreen renderer process is gone", async () => {
+      const bridge = await started();
+      bridge.renderWindow.webContents.emit("render-process-gone", {}, { reason: "crashed", exitCode: 1 });
+      expect(bridge.disposed).toBe(true);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(h.state.calls).toHaveLength(2);
+      resolveCreate(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outputs.keys()).toEqual(["p/s"]);
+      expect(errors).toEqual([]);
+    });
+
+    it("recreates only once for a burst of errors from the same bridge", async () => {
+      const bridge = await started();
+      bridge.emit("error", new Error("a"));
+      bridge.emit("error", new Error("b"));
+      bridge.renderWindow.webContents.emit("render-process-gone", {}, { reason: "crashed", exitCode: 1 });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(h.state.calls).toHaveLength(2);
+    });
+
+    it("reports onError when recreation keeps failing after the retry budget", async () => {
+      const bridge = await started();
+      bridge.emit("error", new Error("send failed"));
+      await vi.advanceTimersByTimeAsync(1000);
+      rejectCreate(1, new Error("r1"));
+      await vi.advanceTimersByTimeAsync(2000);
+      rejectCreate(2, new Error("r2"));
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(errors).toEqual([]);
+      const last = new Error("r3");
+      rejectCreate(3, last);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(errors).toEqual([["p/s", last]]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.state.calls).toHaveLength(4);
+    });
+
+    it("gives up on a bridge that keeps failing right after each recreation", async () => {
+      let bridge = await started();
+      for (const [i, delay] of [1000, 2000, 4000].entries()) {
+        bridge.emit("error", new Error(`e${i}`));
+        await vi.advanceTimersByTimeAsync(delay);
+        bridge = resolveCreate(i + 1);
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      expect(errors).toEqual([]);
+      const last = new Error("final");
+      bridge.emit("error", last);
+      expect(errors).toEqual([["p/s", last]]);
+      expect(bridge.disposed).toBe(true);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.state.calls).toHaveLength(4);
+    });
+
+    it("restores the full retry budget once a bridge has stayed up for a while", async () => {
+      const bridge = await started();
+      bridge.emit("error", new Error("e1"));
+      await vi.advanceTimersByTimeAsync(1000);
+      const second = resolveCreate(1);
+      await vi.advanceTimersByTimeAsync(STABLE_AFTER_MS);
+      second.emit("error", new Error("e2"));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(h.state.calls).toHaveLength(3);
+    });
+
+    it("does not recreate a bridge after it was disabled", async () => {
+      const bridge = await started();
+      await outputs.sync([]);
+      bridge.emit("error", new Error("late"));
+      bridge.renderWindow.webContents.emit("render-process-gone", {}, { reason: "killed", exitCode: 0 });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.state.calls).toHaveLength(1);
+      expect(errors).toEqual([]);
+    });
   });
 
   it("disposeAll tears down all active bridges", async () => {

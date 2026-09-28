@@ -40,6 +40,7 @@ let events: string[];
 let selectWindow: ReturnType<typeof vi.fn>;
 let getDisplayMedia: ReturnType<typeof vi.fn>;
 let getUserMedia: ReturnType<typeof vi.fn>;
+let enumerateDevices: ReturnType<typeof vi.fn>;
 let displays: Deferred<MediaStream>[];
 
 beforeEach(async () => {
@@ -55,8 +56,11 @@ beforeEach(async () => {
     return d.promise;
   });
   getUserMedia = vi.fn();
+  // Default: the publisher's own device list contains the stored deviceId, matching real behaviour
+  // (same-origin windows agree on salted ids) unless a test overrides it.
+  enumerateDevices = vi.fn(async () => [{ deviceId: "d1", label: "Logi", kind: "videoinput" } as MediaDeviceInfo]);
   vi.stubGlobal("window", { hivePublisher: { selectWindow, getSources: vi.fn(), onSourcesChanged: vi.fn() } });
-  vi.stubGlobal("navigator", { mediaDevices: { getDisplayMedia, getUserMedia } });
+  vi.stubGlobal("navigator", { mediaDevices: { getDisplayMedia, getUserMedia, enumerateDevices } });
   vi.resetModules(); // fresh displayQueue per test
   openers = await import("../../src/renderer/publisher/openers");
   ({ CaptureError } = await import("../../src/renderer/publisher/capture-manager"));
@@ -188,5 +192,39 @@ describe("openWebcam", () => {
     expect(err).toMatchObject({ status: "unavailable" });
     expect((err as CaptureErrorType).message).toContain('webcam "Logi"');
     expect((err as CaptureErrorType).message).toContain("in use by OBS?");
+  });
+
+  it("re-resolves by exact label when the stored deviceId isn't valid in this origin", async () => {
+    // The dashboard (a different origin) picked "d1"; the publisher's own salted id differs.
+    enumerateDevices.mockResolvedValueOnce([{ deviceId: "publisher-salted-id", label: "Logi", kind: "videoinput" } as MediaDeviceInfo]);
+    const s = fakeStream();
+    getUserMedia.mockResolvedValueOnce(s.stream);
+    await expect(openers.openWebcam(cam)).resolves.toEqual({ stream: s.stream });
+    expect(getUserMedia).toHaveBeenCalledWith({
+      audio: false,
+      video: { deviceId: { exact: "publisher-salted-id" }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+    });
+  });
+
+  it("keeps the stored deviceId when enumerateDevices fails", async () => {
+    enumerateDevices.mockRejectedValueOnce(new Error("permission denied"));
+    const s = fakeStream();
+    getUserMedia.mockResolvedValueOnce(s.stream);
+    await expect(openers.openWebcam(cam)).resolves.toEqual({ stream: s.stream });
+    expect(getUserMedia).toHaveBeenCalledWith(
+      expect.objectContaining({ video: expect.objectContaining({ deviceId: { exact: "d1" } }) }),
+    );
+  });
+
+  it("fails as before when neither the stored deviceId nor label match any device", async () => {
+    enumerateDevices.mockResolvedValueOnce([{ deviceId: "other-id", label: "Other Cam", kind: "videoinput" } as MediaDeviceInfo]);
+    getUserMedia.mockRejectedValueOnce(new DOMException("not found", "OverconstrainedError"));
+    const err = await openers.openWebcam(cam).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CaptureError);
+    expect(err).toMatchObject({ status: "unavailable" });
+    // Falls through to the stored (now stale) deviceId, which getUserMedia then rejects.
+    expect(getUserMedia).toHaveBeenCalledWith(
+      expect.objectContaining({ video: expect.objectContaining({ deviceId: { exact: "d1" } }) }),
+    );
   });
 });

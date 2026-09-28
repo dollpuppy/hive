@@ -1,0 +1,28 @@
+appId: app.hive.costream
+productName: Hive
+directories:
+  output: release
+files:
+  - out/**/*
+  - package.json
+asarUnpack:
+  - "**/*.node"
+  - "node_modules/@napolab/**"
+extraResources:
+  - from: resources/cloudflared.exe
+    to: cloudflared.exe
+protocols:
+  - name: Hive invite
+    schemes:
+      - hive
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # Local/dev builds: no code-signing certificate is available here.
+  signAndEditExecutable: false
+nsis:
+  oneClick: true
+  perMachine: false
+  deleteAppDataOnUninstall: false

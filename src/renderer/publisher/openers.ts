@@ -64,14 +64,34 @@ export const openWindow: Opener = (source: SourceConfig) => {
   return result;
 };
 
+/**
+ * Chromium salts `enumerateDevices` deviceIds per origin, so a deviceId the dashboard picked
+ * (served from http://127.0.0.1:<port>, and liable to change again on a port fallback) does not
+ * match this publisher window's own ids (loaded via `loadFile`, a distinct origin). Re-resolve it
+ * against the publisher's own device list: keep the stored id if it's still valid here, else fall
+ * back to matching the stored label exactly, else give up as before.
+ */
+async function resolveDeviceId(source: Extract<SourceConfig, { kind: "webcam" }>): Promise<string> {
+  try {
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    if (cams.some((d) => d.deviceId === source.deviceId)) return source.deviceId;
+    const byLabel = cams.find((d) => d.label === source.deviceLabel);
+    if (byLabel) return byLabel.deviceId;
+  } catch {
+    // enumerateDevices failing shouldn't block trying the stored id as-is below.
+  }
+  return source.deviceId;
+}
+
 export const openWebcam: Opener = async (source: SourceConfig) => {
   if (source.kind !== "webcam") throw new Error("not a webcam source");
   const spec = PRESETS[source.preset];
   try {
+    const deviceId = await resolveDeviceId(source);
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
-        deviceId: { exact: source.deviceId },
+        deviceId: { exact: deviceId },
         width: { ideal: spec.width },
         height: { ideal: spec.height },
         frameRate: { ideal: spec.fps },

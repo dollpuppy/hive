@@ -19,15 +19,20 @@ const SELECTION_TTL_MS = 10_000;
 
 const MAX_TITLE_CHARS = 1024;
 
-/** True when `frame` is the Publisher's top-level frame. */
-function isPublisherMainFrame(publisher: WebContents, frame: WebFrameMain | null): boolean {
-  if (!frame || publisher.isDestroyed()) return false;
-  return frame.parent === null && WebContentsStatic.fromFrame(frame) === publisher;
+/** True when `frame` is the top-level frame of `contents`. */
+function isMainFrameOf(contents: WebContents, frame: WebFrameMain | null): boolean {
+  if (!frame || contents.isDestroyed()) return false;
+  return frame.parent === null && WebContentsStatic.fromFrame(frame) === contents;
+}
+
+/** True when an IPC invoke came from the top-level frame of `contents` (the Publisher's, the dashboard's). */
+export function isFromMainFrameOf(contents: WebContents, event: IpcMainInvokeEvent): boolean {
+  return !contents.isDestroyed() && event.sender === contents && isMainFrameOf(contents, event.senderFrame);
 }
 
 /** True when an IPC invoke came from the Publisher's top-level frame. */
 export function isFromPublisher(publisher: WebContents, event: IpcMainInvokeEvent): boolean {
-  return !publisher.isDestroyed() && event.sender === publisher && isPublisherMainFrame(publisher, event.senderFrame);
+  return isFromMainFrameOf(publisher, event);
 }
 
 async function findSource(title: string): Promise<DesktopCapturerSource | undefined> {
@@ -68,7 +73,7 @@ export function installDisplayMediaHandler(publisher: WebContents): void {
 
     // Other pages' requests are denied without touching the selection, so they can't
     // cancel an open the Publisher has in flight.
-    if (!isPublisherMainFrame(publisher, request.frame)) return answer(null);
+    if (!isMainFrameOf(publisher, request.frame)) return answer(null);
     const selection = pending;
     pending = null;
     if (!request.videoRequested) return answer(null);
