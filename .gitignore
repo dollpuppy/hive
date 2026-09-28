@@ -8,3 +8,5 @@ coverage/
 tests/e2e/.harness-dist/
 tests/e2e/.alpha-dist/
 tests/e2e/.dashboard-dist/
+release/
+resources/cloudflared.exe
