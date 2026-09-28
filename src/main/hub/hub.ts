@@ -77,9 +77,11 @@ export class Hub extends EventEmitter {
   private publisher: Channel | null = null;
   private readonly subs = new Map<string, Sub>();
   private heartbeat: ReturnType<typeof setInterval> | null = null;
+  private displayName: string;
 
   constructor(private readonly opts: HubOptions) {
     super();
+    this.displayName = opts.displayName;
   }
 
   get partner(): Partner | null {
@@ -92,6 +94,20 @@ export class Hub extends EventEmitter {
 
   get hasPublisher(): boolean {
     return this.publisher !== null;
+  }
+
+  /** Takes effect on the next handshake; the current partner keeps the old name. */
+  setDisplayName(name: string): void {
+    this.displayName = name;
+  }
+
+  /** Partner viewers per local source id — the dashboard's "N watching". */
+  watcherCounts(): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const sub of this.subs.values()) {
+      if (sub.viewer === null) counts[sub.sourceId] = (counts[sub.sourceId] ?? 0) + 1;
+    }
+    return counts;
   }
 
   // ---------------------------------------------------------------- sources
@@ -145,7 +161,7 @@ export class Hub extends EventEmitter {
     channel.send({
       type: "hello",
       secret,
-      peerName: this.opts.displayName,
+      peerName: this.displayName,
       protocolVersion: PROTOCOL_VERSION,
     });
     return this.peerHandler(link);
@@ -228,7 +244,7 @@ export class Hub extends EventEmitter {
       if (this.peer) return this.reject(link, "full");
       link.channel.send({
         type: "welcome",
-        peerName: this.opts.displayName,
+        peerName: this.displayName,
         protocolVersion: PROTOCOL_VERSION,
       });
       this.establish(link, msg.peerName);
@@ -338,6 +354,7 @@ export class Hub extends EventEmitter {
     }
     this.subs.set(subId, { sourceId, viewer: null, target: "publisher" });
     this.sendPublisher({ type: "subscribe", subId, sourceId, iceServers: this.opts.getIceServers() });
+    this.emit("watchers");
   }
 
   private onPartnerSignal(subId: string, payload: SignalPayload): void {
@@ -481,5 +498,6 @@ export class Hub extends EventEmitter {
     if (sub.target === "publisher" && origin !== "publisher") this.sendPublisher({ type: "unsubscribe", subId });
     const partnerInvolved = sub.target === "partner" || sub.viewer === null;
     if (partnerInvolved && origin !== "partner") this.sendPeer({ type: "unsubscribe", subId });
+    if (sub.viewer === null) this.emit("watchers");
   }
 }
