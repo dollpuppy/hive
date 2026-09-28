@@ -16,6 +16,7 @@
     "start": "npm run build && electron-vite preview --skipBuild",
     "fetch:cloudflared": "node scripts/fetch-cloudflared.mjs",
     "predev": "npm run fetch:cloudflared",
+    "prestart": "npm run fetch:cloudflared",
     "dist": "npm run fetch:cloudflared && npm run build && electron-builder --win"
   },
   "dependencies": {
