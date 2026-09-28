@@ -82,9 +82,8 @@ function ipv4MappedAddress(host: string): string | null {
  *
  * Hostname-based only: this looks at the URL's literal host and never resolves DNS, so a public
  * DNS name that resolves to a loopback address (e.g. `127.0.0.1.nip.io`, or a rebinding domain)
- * is NOT treated as loopback and is not blocked. Accepted limitation — resolving here would be
- * racy (DNS can change between our lookup and Chromium's) and the threat is a remote page reaching
- * a local service, which a user-configured URL source already has to opt into.
+ * is NOT treated as loopback and is not blocked. Known, accepted limitation: resolving here would
+ * be racy anyway (DNS can answer differently between our lookup and Chromium's own).
  */
 function isLoopbackHost(host: string): boolean {
   if (host === "localhost" || host.endsWith(".localhost") || host === "::1") return true;
