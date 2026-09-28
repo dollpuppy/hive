@@ -369,6 +369,16 @@ describe("spout output grace period (amendment 4)", () => {
     expect(synced).toEqual([]);
   });
 
+  it("a partner drop after dispose() (hub.dispose() at shutdown) arms no grace timer", () => {
+    hub.emit("partner", bo);
+    synced.length = 0;
+    session.dispose();
+    hub.emit("partner", null);
+    vi.advanceTimersByTime(60_000);
+    expect(synced).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("leave() with no live partner flushes immediately and does not leave the flag stuck (fix round 1, issue 1, scenario A)", () => {
     session.join("https://a.trycloudflare.com/join#S");
     synced.length = 0;

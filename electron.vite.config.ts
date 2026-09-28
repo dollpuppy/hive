@@ -11,14 +11,23 @@ export default defineConfig({
   },
   preload: {
     build: {
-      rollupOptions: { input: { publisher: resolve(__dirname, "src/preload/publisher.ts") } },
+      rollupOptions: {
+        input: {
+          publisher: resolve(__dirname, "src/preload/publisher.ts"),
+          // Sandboxed: must stay a single file requiring only `electron`.
+          dashboard: resolve(__dirname, "src/preload/dashboard.ts"),
+        },
+      },
     },
   },
   renderer: {
     root: resolve(__dirname, "src/renderer"),
     build: {
       rollupOptions: {
-        input: { publisher: resolve(__dirname, "src/renderer/publisher/index.html") },
+        input: {
+          publisher: resolve(__dirname, "src/renderer/publisher/index.html"),
+          dashboard: resolve(__dirname, "src/renderer/dashboard/index.html"),
+        },
       },
     },
   },

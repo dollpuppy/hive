@@ -49,6 +49,7 @@ export class SessionController extends EventEmitter {
   private readonly newId: () => string;
   private readonly spoutGraceMs: number;
   private spoutGraceTimer: ReturnType<typeof setTimeout> | null = null;
+  private disposed = false;
   /** Set by a kick (ours or theirs), so the next `partner: null` skips the grace period. */
   private kickOrLeavePending = false;
   /**
@@ -282,6 +283,7 @@ export class SessionController extends EventEmitter {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.stopJoin();
     this.clearSpoutGrace();
     this.deps.tunnel.stop();
@@ -320,7 +322,8 @@ export class SessionController extends EventEmitter {
   }
 
   private startSpoutGrace(): void {
-    if (this.spoutGraceTimer) return;
+    // hub.dispose() (after ours, at shutdown) emits `partner: null`: don't arm a timer then.
+    if (this.spoutGraceTimer || this.disposed) return;
     this.spoutGraceTimer = setTimeout(() => {
       this.spoutGraceTimer = null;
       this.deps.syncSpoutOutputs(null, this.cfg.spoutOut);
